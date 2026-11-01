@@ -6,6 +6,7 @@ import {
   fillCppInput,
   fillPythonInput,
   loadProblem,
+  loadProblemImages,
   makeInput,
   openProblemPage,
   type GeneratedInput,
@@ -278,8 +279,27 @@ function ProblemPane({
     setState({ kind: "loading", id });
     loadProblem(id, refresh)
       .then((problem) => {
-        if (!cancelled) {
-          setState({ kind: "ok", problem });
+        if (cancelled) {
+          return;
+        }
+        setState({ kind: "ok", problem });
+        // 文を先に出し、保存していない画像はあとから取得して差し替える（Phase 23。D-240）
+        if (problem.pendingImages) {
+          loadProblemImages(id)
+            .then((statementHtml) => {
+              if (!cancelled) {
+                setState((current) =>
+                  current.kind === "ok" &&
+                  current.problem.contest === problem.contest &&
+                  current.problem.task === problem.task
+                    ? { kind: "ok", problem: { ...current.problem, statementHtml, pendingImages: false } }
+                    : current,
+                );
+              }
+            })
+            .catch(() => {
+              // 読み込めなくても、文はそのまま読める（次に表示したときにまた読む）
+            });
         }
       })
       .catch((e) => {

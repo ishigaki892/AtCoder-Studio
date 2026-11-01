@@ -14,11 +14,18 @@ export type ProblemView = {
   // 無害化した問題文の HTML（D-113・D-118）
   statementHtml: string;
   sampleCount: number;
+  // 保存していない画像がある（画像の所は「読み込んでいます」。loadProblemImages で取得して差し替える。D-240）
+  pendingImages: boolean;
 };
 
 // 保存してあればそれを返し、なければ（または refresh のとき）取得する（D-110〜D-112）
 export function loadProblem(id: ProblemId, refresh: boolean): Promise<ProblemView> {
   return invoke<ProblemView>("load_problem", { ...id, refresh });
+}
+
+// 保存していない問題文の画像を取得して（img.atcoder.jp だけ。1 秒の間隔）、無害化した問題文の HTML を返す（Phase 23。D-240）
+export function loadProblemImages(id: ProblemId): Promise<string> {
+  return invoke<string>("load_problem_images", { ...id });
 }
 
 // 実行の対象のパッケージのフォルダから決まる問題（D-117・D-155）。決まらなければ null。

@@ -25,6 +25,7 @@ import {
   openSettingsFile,
   reloadSettings,
   saveAppState,
+  DEFAULT_NOTIFY_SETTINGS,
   DEFAULT_PROBLEM_SETTINGS,
   DEFAULT_PYTHON_SETTINGS,
   type Appearance,
@@ -32,6 +33,7 @@ import {
   type PythonSettings,
   type SettingsView,
   type SubmitSettings,
+  type NotifySettings,
 } from "./ipc/state";
 import SettingsDialog from "./settings/SettingsDialog";
 import PaneBoundary from "./layout/PaneBoundary";
@@ -75,6 +77,7 @@ import {
 import BottomPanel, { type PanelTab } from "./panels/BottomPanel";
 import ProblemPane from "./panels/ProblemPane";
 import ProblemSelector from "./panels/ProblemSelector";
+import ContestClock from "./panels/ContestClock";
 import {
   problemChoice,
   packageProblem,
@@ -352,6 +355,8 @@ function App() {
     testBeforeSubmit: true,
     confirmDialog: true,
   });
+  // 通知の設定（Phase 22 作業 2。D-239）。設定の画面に使う。知らせるかは Rust 側が読み直して決める
+  const [notifySettings, setNotifySettings] = useState<NotifySettings>(DEFAULT_NOTIFY_SETTINGS);
   // 問題文の欄の設定（Phase 15 作業 3。D-196・D-197）
   const [problemSettings, setProblemSettings] = useState<ProblemSettings>(DEFAULT_PROBLEM_SETTINGS);
   // Python の設定（Phase 19 作業 3。D-221）。設定の画面に使う。動かすときは Rust 側が読み直す
@@ -426,6 +431,14 @@ function App() {
   const [unlinkedProblem, setUnlinkedProblem] = useState<ProblemId | null>(null);
   const currentProblem =
     folderProblem !== null && unlinked ? (unlinkedProblem ?? folderProblem) : (folderProblem ?? chosenProblem);
+  // ツールバーの残り時間のコンテスト（D-238）：今の問題のコンテスト。選択欄で「一覧」を押したときは、
+  // 一覧が読めなくても（開始前でも）そのコンテストにする。問題が変わったら、その問題のコンテストに戻る
+  const [clockContest, setClockContest] = useState<string | null>(null);
+  useEffect(() => {
+    if (currentProblem) {
+      setClockContest(currentProblem.contest);
+    }
+  }, [currentProblem?.contest, currentProblem?.task]);
   // 対象のパッケージが変わったら、フォルダから決まる問題と、そのパッケージで前に選んだ問題を読む
   // （フォルダから決まれば、そちらを使う）。読み終わるまで（読めなければそのまま）、前のパッケージの問題は使わない
   useEffect(() => {
@@ -1017,6 +1030,7 @@ function App() {
         const settingsProblem = applySettings(startup.settings);
         setAppearance(startup.settings.appearance);
         setSubmitSettings(startup.settings.submit);
+        setNotifySettings(startup.settings.notify);
         setProblemSettings(startup.settings.problem);
         setPythonSettings(startup.settings.python);
         if (settingsProblem) {
@@ -1402,6 +1416,7 @@ function App() {
         setError(applySettings(settings));
         setAppearance(settings.appearance);
         setSubmitSettings(settings.submit);
+        setNotifySettings(settings.notify);
         setProblemSettings(settings.problem);
         setPythonSettings(settings.python);
         setSettingsSeq((seq) => seq + 1);
@@ -1675,7 +1690,7 @@ function App() {
         onDrag={(clientX) => dragSidebar(clientX)}
       />
 
-      {/* ボタンゾーン：問題の選択欄（Phase 3a。D-115）と「実行」「サンプルテスト」（D-044・D-046・D-047・D-100） */}
+      {/* ボタンゾーン：問題の選択欄（Phase 3a。D-115）と「実行」「サンプルテスト」（D-044・D-046・D-047・D-100）、右端に残り時間（D-238） */}
       <div className="toolbar">
         <PaneBoundary name="ツールバー">
         <ProblemSelector
@@ -1691,6 +1706,7 @@ function App() {
               : undefined
           }
           onChoose={chooseProblem}
+          onList={setClockContest}
           onError={showError}
         />
         <RunButtons
@@ -1717,6 +1733,8 @@ function App() {
           }}
           onSubmit={() => void handleSubmit()}
         />
+        {/* 右端：コンテストの開始までの時間・残り時間（Phase 22。D-238） */}
+        <ContestClock contest={clockContest} />
         </PaneBoundary>
       </div>
 
@@ -1867,13 +1885,15 @@ function App() {
         <SettingsDialog
           appearance={appearance}
           submit={submitSettings}
+          notify={notifySettings}
           problem={problemSettings}
           python={pythonSettings}
           resetSeq={settingsSeq}
           onClose={() => setSettingsOpen(false)}
-          onSaved={(saved, submit, problem, interpreter) => {
+          onSaved={(saved, submit, notify, problem, interpreter) => {
             setAppearance(saved);
             setSubmitSettings(submit);
+            setNotifySettings(notify);
             setProblemSettings(problem);
             setPythonSettings((current) => ({ ...current, interpreter }));
           }}

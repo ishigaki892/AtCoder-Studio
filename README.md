@@ -1,16 +1,16 @@
 # AtCoder Studio
 
-AtCoder の問題を Rust・C++・Python で解くための、macOS 向けデスクトップ IDE です。問題の取得からサンプルテスト、デバッグ、提出までを、ひとつのウィンドウで済ませられます。
+AtCoder の問題を Rust・C++・Python で解くための macOS 向けデスクトップ IDE です。問題の取得からサンプルテスト、デバッグ、提出までをひとつのウィンドウで完結できます。
 
-## できること
+## 主な機能
 
-- **問題の準備**：コンテスト ID を入れるだけで、全問題のフォルダ（サンプル・自分の雛形入り）をまとめて作れます。問題文は数式付きでウィンドウ内に表示されます。問題文の入力形式から、入力を読むコード（Rust は proconio の `input!`、C++ は `cin`、Python は `input()`）を自動で作ることもできます。
-- **テスト**：サンプルテストの判定（AC・WA・RE・TLE・MLE・OLE・CE）に加えて、生成器と愚直解を使ったランダムテストや、インタラクティブ問題の対話テストもできます。
-- **エディタ**：CodeMirror 6 をベースに、rust-analyzer・clangd・basedpyright による補完・診断・定義ジャンプが使えます（整形は Rust と C++ のみ）。言語ごとのスニペットも登録できます。
-- **デバッグ**：ブレークポイント、ステップ実行、変数とウォッチ式の表示ができます。Rust と C++ は Apple の `lldb-dap`、Python は debugpy を使います。Rust の panic、C++ の例外や `abort`、Python の捕まえていない例外で止まります。
-- **提出**：開催中のコンテストなら IDE から直接提出して、そのまま判定を追えます。ログインは IDE 内の専用ウィンドウで行うので、パスワードが IDE に渡ることはありません。サイドバーの「コンテスト」で、問題ごとの AC 状況も確認できます。
+- **問題の準備**：コンテスト ID を入力するだけで、全問題のフォルダ（サンプル・雛形入り）をまとめて作成できます。問題文は数式・画像付きでウィンドウ内に表示されます。また、問題文の入力形式から入力を読み込むコード（Rust は proconio の `input!`、C++ は `cin`、Python は `input()`）を自動生成することも可能です。
+- **テスト**：サンプルテストの判定（AC・WA・RE・TLE・MLE・OLE・CE）に加え、生成器と愚直解を用いたランダムテストや、インタラクティブ問題の対話テストを行えます。
+- **エディタ**：CodeMirror 6 をベースに、rust-analyzer・clangd・basedpyright による補完・診断・定義ジャンプに対応しています（コード整形は Rust と C++ のみ）。言語ごとのスニペット登録も可能です。
+- **デバッグ**：ブレークポイント、ステップ実行、変数・ウォッチ式の表示に対応しています。Rust と C++ は Apple の `lldb-dap`、Python は `debugpy` を使用します。Rust の panic、C++ の例外や `abort`、Python の未処理例外で自動的に停止します。
+- **提出**：開催中のコンテストであれば、IDE から直接提出して結果の判定をリアルタイムで追跡できます。ログインは IDE 内の専用ウィンドウで行うため、パスワードが IDE に直接渡ることはありません。サイドバーの「コンテスト」から、問題ごとの AC 状況に加えて、順位・予想パフォーマンス・各問題の予想 diff（いずれも近似値）も確認できます。また、ツールバーにコンテストの残り時間を表示し、ジャッジ結果の確定やコンテストの開始を macOS の通知でお知らせすることもできます（設定で有効にします）。
 
-対応している言語と提出時の言語は次のとおりです。
+対応言語および提出時の対応環境は以下の通りです。
 
 | 言語 | 手元の環境 | 提出時の言語 |
 |---|---|---|
@@ -19,46 +19,47 @@ AtCoder の問題を Rust・C++・Python で解くための、macOS 向けデス
 | Python | CPython 3.13 または PyPy 3.11 | Python (CPython 3.13.7) / Python (PyPy 3.11-v7.3.20) |
 
 > [!IMPORTANT]
-> AtCoder の非公式ツールです。AtCoder 株式会社とは関係ありません。
+> 本アプリは AtCoder の非公式ツールです。AtCoder 株式会社とは一切関係ありません。
 >
-> - 提出機能は自己責任でお使いください。故意または重大な過失がある場合を除き、製作者は責任を負いません。
-> - コンテストに参加するときは、そのコンテストのルール（生成 AI の利用に関するルールを含む）を守ってください。
+> - 提出機能の利用は自己責任で行ってください。故意または重大な過失がある場合を除き、製作者は責任を負いません。
+> - コンテストに参加する際は、生成 AI の利用に関するルールを含め、該当コンテストの規程を必ず遵守してください。
 
-## 必要なもの
+## 動作環境・必要なもの
 
-動作を確認しているのは macOS 26.6.2（Apple Silicon）だけです。使う言語に合わせて、次のものを用意してください。
+動作確認環境：macOS 26.6.2（Apple Silicon）  
+使用する言語に合わせて、事前に以下の環境をご用意ください。
 
-- **Rust**：[rustup](https://rustup.rs) でインストールした Rust。ジャッジと同じ rustc 1.89.0 を rustup の既定にしておくと、手元とジャッジの差が小さくなります（今の既定は `rustup toolchain list` の `(active, default)` の行で確認できます）。
-- **C++**：Homebrew の GCC（`brew install gcc` で入る `g++-15`）。Apple の clang は `#include <bits/stdc++.h>` が使えないので使いません。
-  - AC Library を使う場合は、ジャッジと同じ 1.6 を [atcoder/ac-library](https://github.com/atcoder/ac-library) からダウンロードして、アプリのフォルダの `libraries/ac-library/atcoder/` に置きます（詳しくは [C++](docs/usage.md#c)）。
-- **Python**：Homebrew の Python（`brew install python@3.13`。PyPy を使うなら `brew install pypy3.11` も）。補完などを使うには basedpyright（`brew install basedpyright`）が必要です。デバッグに使う debugpy は、初めてデバッグするときに IDE がインストール方法を案内します。
-- **デバッグと C++ の補完**：Xcode の Command Line Tools（`lldb-dap` と `clangd` が入っています）。入っていなければ、IDE が `xcode-select --install` を案内します。
+- **Rust**：[rustup](https://rustup.rs) でインストールした Rust。ジャッジ環境と同じ rustc 1.89.0 を rustup の既定に設定しておくと、手元とジャッジの差異を抑えられます（現在の既定は `rustup toolchain list` の `(active, default)` 行で確認できます）。
+- **C++**：Homebrew の GCC（`brew install gcc` で導入する `g++-15`）。Apple 製の clang は `#include <bits/stdc++.h>` に対応していないため使用できません。
+  - AC Library を利用する場合は、ジャッジと同じバージョン 1.6 を [atcoder/ac-library](https://github.com/atcoder/ac-library) からダウンロードし、アプリフォルダ内の `libraries/ac-library/atcoder/` に配置してください（詳細は [C++](docs/usage.md#c) を参照）。
+- **Python**：Homebrew の Python（`brew install python@3.13`。PyPy の場合は `brew install pypy3.11`）。コード補完等には basedpyright（`brew install basedpyright`）が必要です。デバッグに使用する `debugpy` は、初めてデバッグを実行する際に IDE がインストール方法を案内します。
+- **デバッグおよび C++ の補完**：Xcode Command Line Tools（`lldb-dap` および `clangd` が含まれています）。未導入の場合は、IDE が `xcode-select --install` の実行を案内します。
 
-## インストール
+## インストール方法
 
-[Releases](https://github.com/ishigaki892/acd_studio/releases) から `.dmg` をダウンロードするのが手軽です。`.dmg` は Apple Silicon 用のみなので、Intel Mac の場合は[ソースからビルド](#ソースからビルドする)してください。
+[Releases](https://github.com/ishigaki892/acd_studio/releases) から `.dmg` ファイルをダウンロードするのが最も手軽です。`.dmg` は Apple Silicon 用のみ提供されているため、Intel Mac の場合は[ソースからビルド](#ソースからビルドする場合)してください。
 
-### .dmg からインストールする
+### .dmg からインストールする場合
 
 1. Releases から `AtCoder.Studio_<バージョン>_aarch64.dmg` をダウンロードして開きます。
-2. 表示されたウィンドウで、AtCoder Studio を「Applications」フォルダにドラッグします。
-3. Finder の「アプリケーション」から AtCoder Studio を開きます。
+2. 表示されたウィンドウで、AtCoder Studio を「Applications」フォルダにドラッグ＆ドロップします。
+3. Finder の「アプリケーション」から AtCoder Studio を起動します。
 
-このアプリは Developer ID での署名や Apple の公証をしていない（ad-hoc 署名のみ）ため、初回は macOS にブロックされます。そのときは「完了」を押してから、「システム設定」→「プライバシーとセキュリティ」を開き、下のほうにある「このまま開く」を押して、もう一度起動してください。
+本アプリは Developer ID による正式な署名や Apple の公証を受けておらず（アドホック署名のみ）、初回起動時に macOS によってブロックされることがあります。その場合は「完了」をクリックした後、「システム設定」>「プライバシーとセキュリティ」を開き、下部にある「このまま開く」をクリックして再度起動してください。
 
-ターミナルで次のコマンドを実行して、ダウンロード時に付く印を外してから開く方法もあります。
+または、ターミナルで次のコマンドを実行して quarantine 属性を削除してから開くことも可能です。
 
 ```sh
 xattr -dr com.apple.quarantine "/Applications/AtCoder Studio.app"
 ```
 
-**アップデートするとき**：AtCoder Studio を終了（⌘Q）し、`/Applications/AtCoder Studio.app` を削除してから、新しい `.dmg` で手順 2〜3 を行います。設定・履歴・保存した問題はアプリのフォルダにあるので、そのまま残ります（[データの場所](docs/usage.md#データの場所)）。
+**アップデート時の手順**：AtCoder Studio を終了（`⌘Q`）し、`/Applications/AtCoder Studio.app` を削除した上で、新しい `.dmg` を用いて手順 2〜3 を行ってください。設定・履歴・保存済み問題のデータは別フォルダに保持されるため、そのまま引き継がれます（[データの場所](docs/usage.md#データの場所)）。
 
-### ソースからビルドする
+### ソースからビルドする場合
 
-ビルドには Node.js（`.nvmrc` のバージョン）と npm、Rust が必要です。
+ビルドには Node.js（`.nvmrc` で指定されたバージョン）、npm、および Rust が必要です。
 
-1. リポジトリの最上位でビルドします（3 分ほどかかります）。
+1. リポジトリのルートディレクトリでビルドを実行します（約 3 分ほどかかります）。
 
    ```sh
    nvm use
@@ -66,34 +67,37 @@ xattr -dr com.apple.quarantine "/Applications/AtCoder Studio.app"
    npm run tauri build
    ```
 
-2. 開発用のアプリ（`npm run tauri dev`）を起動している場合は止めておきます（同じ設定を使うので、同時には起動できません）。
-3. できたアプリを `/Applications` にコピーします。
+2. 開発用アプリ（`npm run tauri dev`）を起動している場合は停止してください（同一の設定を使用するため同時起動はできません）。
+3. ビルド成果物のアプリを `/Applications` にコピーします。
 
    ```sh
    cp -R "src-tauri/target/release/bundle/macos/AtCoder Studio.app" /Applications/
    ```
 
-4. Finder の「アプリケーション」から AtCoder Studio を開きます。
+4. Finder の「アプリケーション」から AtCoder Studio を起動します。
 
-新しいソースでビルドし直したときは、AtCoder Studio を終了して `/Applications/AtCoder Studio.app` を削除してから、手順 3 でコピーし直してください。
+新しいソースコードで再ビルドした際は、AtCoder Studio を終了して `/Applications/AtCoder Studio.app` を削除してから、手順 3 のコピーをやり直してください。
 
-## 使ってみる
+## 使い方
 
-1. **フォルダを開く**：ファイル一覧の「フォルダを開く」（⌘O）で、問題を置くフォルダを選びます。初めて開くフォルダでは「このフォルダを信頼しますか」と聞かれるので、自分で作ったフォルダなら「信頼する」を選んでください。信頼しないフォルダでは、コードを実行する操作ができません。
-2. **コンテストを作る**：ファイル一覧の上にある「⤓」を押し、コンテスト ID（例：`abc480`）を入れて「作る」を押します。`abc480/abc480_a/` のように問題ごとのフォルダができ、A 問題のファイルが開いて、右に問題文が表示されます。
-   - C++ や Python で解くときは、先に設定画面（⌘,）の「問題文」で「問題を作るときの言語」を切り替えておきます。開くファイルは、Rust なら `src/main.rs`、C++ なら `main.cpp`、Python なら `main.py` です。
-3. **解いてテストする**：解答を書いたら「サンプルテスト」（⇧⌘R）を押します。下の「テスト結果」タブに、ケースごとの判定が表示されます。
-4. **提出する**：開催中のコンテストなら、右下の「提出結果」からログインして「提出」を押します。確認ダイアログで「提出する」を選ぶと提出され、判定が出るまで追いかけます。開催期間外の問題では、代わりに「コードをコピーして公式の提出ページを開く」が使えます。
+1. **フォルダを開く**：ファイル一覧の「フォルダを開く」（`⌘O`）から、問題を保存するディレクトリを選択します。初回起動時は「このフォルダを信頼しますか」と確認されるため、ご自身で作成したフォルダであれば「信頼する」を選択してください（信頼されていないフォルダではコードの実行操作が行えません）。
+2. **コンテストの作成**：ファイル一覧の上の「⤓」ボタンを押し、コンテスト ID（例：`abc480`）を入力して「作る」をクリックします。`abc480/abc480_a/` のような問題別フォルダが生成され、A 問題のファイルが開くと同時に右側に問題文が表示されます。
+   - C++ や Python で取り組む場合は、事前に設定画面（`⌘,`）の「問題文」タブで「問題を作るときの言語」を切り替えておいてください。開かれるファイルは、Rust なら `src/main.rs`、C++ なら `main.cpp`、Python なら `main.py` となります。
+3. **解答とテスト**：コードを記述したら「サンプルテスト」（`⇧⌘R`）を実行します。下部の「テスト結果」タブに、テストケースごとの判定結果が表示されます。
+4. **コードの提出**：開催中のコンテストであれば、右下の「提出結果」からログインし「提出」ボタンを押します。確認ダイアログで「提出する」を選択すると、提出後にジャッジ結果がリアルタイムで更新されます。コンテスト期間外の問題では、代わりに「コードをコピーして公式の提出ページを開く」機能を利用できます。
 
-機能ごとの詳しい使い方は [docs/usage.md](docs/usage.md) にまとめています。
+各機能の詳細な使い方は [docs/usage.md](docs/usage.md) をご覧ください。
 
 ## 開発について
 
-- 公開しているリポジトリには、開発用の文書（設計の記録・作業ログ・開発の手順をまとめた CLAUDE.md）は置いていません。`docs/` にあるのは使い方（[docs/usage.md](docs/usage.md)）だけなので、コードのコメントに出てくる `docs/` 内のほかのファイルは見られません。
-- 開発用のコマンドは、`npm run tauri dev`（開発用に起動）、`npm run build`（フロントエンドの型チェックとビルド）、`src-tauri/` での `cargo test`・`cargo clippy --all-targets`・`cargo fmt` です。
-- Windows には対応していません。
-- Claude Codeを使用して開発しています。
+- 公開リポジトリには、開発用のドキュメント（設計の記録・作業ログ・開発手順をまとめた `CLAUDE.md`）は含まれていません。`docs/` 配下に配置されているのは使い方ガイド（[docs/usage.md](docs/usage.md)）のみであるため、コード内のコメント等で言及されている他の `docs/` 内ファイルは一般には公開されていません。
+- 開発用の主なコマンド：
+  - `npm run tauri dev`（開発モードでの起動）
+  - `npm run build`（フロントエンドの型チェックとビルド）
+  - `src-tauri/` ディレクトリでの `cargo test`、`cargo clippy --all-targets`、`cargo fmt`
+- Windows 環境には対応していません。
+- 本ツールの開発には Claude Code が使用されています。
 
 ## ライセンス
 
-[MIT](LICENSE) です。依存ライブラリはそれぞれのライセンスに従います。配布しているアプリに含まれるライブラリの一覧とライセンス全文は [THIRD_PARTY_LICENSES.txt](THIRD_PARTY_LICENSES.txt) にあります（Releases にも `.dmg` と一緒に置いています）。
+[MIT ライセンス](LICENSE) です。依存ライブラリはそれぞれのライセンスに準拠します。配布アプリに含まれるライブラリ一覧およびライセンス全文は `THIRD_PARTY_LICENSES.txt` に記載されています（Releases の `.dmg` と共に対象ファイルも同梱されています）。

@@ -3,6 +3,7 @@ mod compare;
 mod cpp;
 mod debug;
 mod history;
+mod images;
 mod input_cpp;
 mod input_gen;
 mod input_py;
@@ -10,6 +11,7 @@ mod interactive;
 mod language;
 mod lsp;
 mod menu;
+mod notify;
 mod problem;
 mod process;
 mod python;
@@ -57,6 +59,8 @@ pub fn run() {
     tauri::Builder::default()
         // フォルダ選択の画面を Rust 側から開くために使う。WebView には dialog の権限を与えない（capability に入れない）
         .plugin(tauri_plugin_dialog::init())
+        // 通知（Phase 22 作業 2。D-235）。Rust 側だけで使い、WebView には権限を与えない
+        .plugin(tauri_plugin_notification::init())
         .manage(commands::Workspace::default())
         .manage(Closing::default())
         .manage(run::RunControl::default())
@@ -162,6 +166,7 @@ pub fn run() {
             commands::load_history,
             commands::clear_history,
             commands::load_problem,
+            commands::load_problem_images,
             commands::load_task_list,
             commands::open_problem_page,
             commands::atcoder_login,
@@ -170,6 +175,8 @@ pub fn run() {
             commands::atcoder_submit,
             commands::atcoder_submissions,
             commands::contest_status,
+            commands::contest_period,
+            commands::watch_contest_start,
             commands::atcoder_refresh_submission,
             commands::open_submit_page,
             commands::open_submission_page,
@@ -199,4 +206,86 @@ pub fn run() {
                 app.state::<lsp::LspControl>().stop();
             }
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    // `start` から `end` までの間を、1 行に 1 つずつの項目として読む
+    fn items<'a>(text: &'a str, start: &str, end: &str) -> Vec<&'a str> {
+        let from = text.find(start).expect(start) + start.len();
+        let to = text[from..].find(end).expect(end) + from;
+        text[from..to]
+            .lines()
+            .map(|line| line.trim().trim_end_matches(','))
+            .filter(|line| !line.is_empty() && !line.starts_with("//"))
+            .collect()
+    }
+
+    fn unique(list: Vec<String>, what: &str) -> BTreeSet<String> {
+        let set: BTreeSet<String> = list.iter().cloned().collect();
+        assert_eq!(set.len(), list.len(), "{what} に同じ名前が 2 つあります");
+        set
+    }
+
+    // 画面から呼ぶコマンドは、ここで登録し、`build.rs` の一覧と capability の許可にも足す（D-055）。
+    // どれかが抜けると画面からの呼び出しが拒まれるので、3 つがそろっているかを確かめる（Phase 22 作業 1 の漏れ）
+    #[test]
+    fn registered_commands_are_listed_and_allowed() {
+        let handler = unique(
+            items(include_str!("lib.rs"), "generate_handler![", "])")
+                .into_iter()
+                .map(|item| {
+                    item.strip_prefix("commands::")
+                        .unwrap_or_else(|| panic!("commands:: でない項目：{item}"))
+                        .to_string()
+                })
+                .collect(),
+            "lib.rs の generate_handler!",
+        );
+        let manifest = unique(
+            items(include_str!("../build.rs"), ".commands(&[", "])")
+                .into_iter()
+                .map(|item| item.trim_matches('"').to_string())
+                .collect(),
+            "build.rs の一覧",
+        );
+        let capability: serde_json::Value =
+            serde_json::from_str(include_str!("../capabilities/default.json")).unwrap();
+        let allowed = unique(
+            capability["permissions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|permission| permission.as_str()?.strip_prefix("allow-"))
+                .map(|name| name.replace('-', "_"))
+                .collect(),
+            "capabilities/default.json の許可",
+        );
+        assert!(handler.len() > 50, "読み方が違う：{handler:?}");
+        let missing = |from: &BTreeSet<String>, to: &BTreeSet<String>| -> Vec<String> {
+            from.difference(to).cloned().collect()
+        };
+        assert_eq!(
+            missing(&handler, &manifest),
+            Vec::<String>::new(),
+            "build.rs の一覧にない"
+        );
+        assert_eq!(
+            missing(&manifest, &handler),
+            Vec::<String>::new(),
+            "lib.rs で登録していない"
+        );
+        assert_eq!(
+            missing(&handler, &allowed),
+            Vec::<String>::new(),
+            "capability で許可していない"
+        );
+        assert_eq!(
+            missing(&allowed, &handler),
+            Vec::<String>::new(),
+            "lib.rs で登録していない（許可だけある）"
+        );
+    }
 }

@@ -1,6 +1,6 @@
 [package]
 name = "atcoder-studio"
-version = "0.1.4"
+version = "0.1.5"
 description = "AtCoder Studio"
 authors = ["ishigaki"]
 license = "MIT"
@@ -23,6 +23,8 @@ tauri = { version = "2", features = [] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tauri-plugin-dialog = "2.8.3"
+# 判定・コンテストの開始の通知（Phase 22 作業 2。D-235）。Rust 側だけで使う
+tauri-plugin-notification = "2.7.0"
 trash = "5.2.9"
 libc = "0.2.190"
 # 問題ページの HTML の読み取り（Phase 3a 作業 1）。Tauri が使っているものと同じ版（P3a-02）

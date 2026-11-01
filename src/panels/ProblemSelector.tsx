@@ -11,10 +11,12 @@ type Props = {
   onUnlink?: () => void;
   onRelink?: () => void;
   onChoose: (id: ProblemId) => void;
+  // 「一覧」を押した（読めたかどうかによらない）。開始前のコンテストの残り時間に使う（D-238）
+  onList?: (contest: string) => void;
   onError: (message: string) => void;
 };
 
-function ProblemSelector({ current, fromFolder, onUnlink, onRelink, onChoose, onError }: Props) {
+function ProblemSelector({ current, fromFolder, onUnlink, onRelink, onChoose, onList, onError }: Props) {
   const [contest, setContest] = useState(current?.contest ?? "");
   // 読み込んだ一覧と、そのコンテスト ID
   const [tasks, setTasks] = useState<{ contest: string; list: TaskEntry[] } | null>(null);
@@ -34,6 +36,7 @@ function ProblemSelector({ current, fromFolder, onUnlink, onRelink, onChoose, on
     if (!id) {
       return;
     }
+    onList?.(id);
     setLoading(true);
     try {
       setTasks({ contest: id, list: await loadTaskList(id, false) });

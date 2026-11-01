@@ -97,7 +97,8 @@ for name, lic, url, files, authors in entries:
     if not files:
         # パッケージにライセンスのファイルがないもの：表記のライセンスの全文を付ける
         who = ", ".join(authors) or "the " + name.split(" ")[0] + " authors"
-        if "MIT" in lic.split(" ") or lic == "MIT":
+        # 「MIT OR Apache-2.0」のほか、古い書き方の「MIT/Apache-2.0」も読む（mac-notification-sys。Phase 22）
+        if "MIT" in lic.replace("/", " ").split(" "):
             parts.append("(パッケージにライセンスのファイルがないので、表記のうち MIT の全文を付けます)\n\n" + MIT.format(who=who))
         elif lic == "MPL-2.0" and mpl:
             parts.append("(パッケージにライセンスのファイルがないので、MPL-2.0 の全文を付けます)\n\n" + mpl.read_text().rstrip() + "\n")

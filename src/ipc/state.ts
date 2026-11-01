@@ -44,6 +44,16 @@ export type SubmitSettings = {
   confirmDialog: boolean;
 };
 
+// settings.json の通知の設定（Phase 22 作業 2。D-239）。初期値はどちらもオフ。知らせるときは Rust 側が読み直す
+export type NotifySettings = {
+  // IDE から出した提出の判定が決まったとき
+  judge: boolean;
+  // 残り時間を出しているコンテストが始まったとき
+  contestStart: boolean;
+};
+
+export const DEFAULT_NOTIFY_SETTINGS: NotifySettings = { judge: false, contestStart: false };
+
 // settings.json の問題文の欄の設定（Phase 15 作業 3。D-196・D-197）
 export type ProblemSettings = {
   // 見出しの行に出すボタン（PROBLEM_BUTTONS の名前）。出さないものは「…」の一覧に入る
@@ -101,6 +111,7 @@ export type SettingsView = {
   invalidKeyBindings: string[];
   appearance: Appearance;
   submit: SubmitSettings;
+  notify: NotifySettings;
   problem: ProblemSettings;
   python: PythonSettings;
   appearanceProblems: string[];
@@ -132,15 +143,17 @@ export function reloadSettings(): Promise<SettingsView | null> {
   return invoke<SettingsView | null>("reload_settings");
 }
 
-// 設定の画面の保存（作業 6b。D-159）。確認のダイアログを省く設定に変えるときは、Rust 側が OS のダイアログで確かめる（D-162）
+// 設定の画面の保存（作業 6b。D-159）。確認のダイアログを省く設定に変えるときは、Rust 側が OS のダイアログで確かめる（D-162）。
+// 通知をオンにしたときは、Rust 側がテストの通知を出す（D-239）
 export function saveSettings(
   keyBindings: LoadedKeyBinding[],
   appearance: Appearance,
   submit: SubmitSettings,
+  notify: NotifySettings,
   problem: ProblemSettings,
   interpreter: Interpreter,
 ): Promise<SaveSettingsOutcome> {
-  return invoke<SaveSettingsOutcome>("save_settings", { keyBindings, appearance, submit, problem, interpreter });
+  return invoke<SaveSettingsOutcome>("save_settings", { keyBindings, appearance, submit, notify, problem, interpreter });
 }
 
 // settings.json を既定のテキストエディタで開く（D-159）

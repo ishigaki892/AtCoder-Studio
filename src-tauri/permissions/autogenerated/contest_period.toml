@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-contest-period"
+description = "Enables the contest_period command without any pre-configured scope."
+commands.allow = ["contest_period"]
+
+[[permission]]
+identifier = "deny-contest-period"
+description = "Denies the contest_period command without any pre-configured scope."
+commands.deny = ["contest_period"]

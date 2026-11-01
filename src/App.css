@@ -1219,6 +1219,41 @@ button.breadcrumb:focus-visible {
   pointer-events: none;
 }
 
+/* ツールバーの右端の残り時間（D-238）。マウスを乗せると開催期間を出す（ツールチップは右端にそろえる） */
+.contest-clock-wrap {
+  position: relative;
+  margin-left: auto;
+  padding-left: 12px;
+}
+
+.contest-clock-wrap[data-tip]:hover::after {
+  content: attr(data-tip);
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 20;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-toolbar);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+  color: var(--fg-default);
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.contest-clock {
+  color: var(--fg-secondary);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* 残り 5 分を切ったとき */
+.contest-clock-warn {
+  color: var(--verdict-ng);
+  font-weight: 600;
+}
+
 .run-button {
   min-width: 72px;
   height: 26px;
@@ -1919,6 +1954,19 @@ button.breadcrumb:focus-visible {
 
 .sample-copy:hover {
   background: var(--bg-list-selected);
+}
+
+/* 問題文の画像（Phase 23。D-240）。欄の幅を超えない。width のあるものは、その幅まで。
+   背景が透明な図も読めるよう、後ろを白にする（--problem-image-bg） */
+.problem-statement img {
+  display: block;
+  box-sizing: border-box;
+  max-width: 100%;
+  height: auto;
+  margin: 8px auto;
+  padding: 4px;
+  border-radius: 2px;
+  background: var(--problem-image-bg);
 }
 
 .problem-statement pre {

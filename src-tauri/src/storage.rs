@@ -161,6 +161,34 @@ fn parse_submit(value: &Value, problems: &mut Vec<String>) -> SubmitSettings {
     submit
 }
 
+// settings.json の通知の設定（Phase 22 作業 2。D-239）。書いていない・読めない項目は false（初期値はオフ。
+// 最初の通知のときに macOS が許可の確認を出すので、設定の画面でオンにしたときにテストの通知を出してそこで確かめる）
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NotifySettings {
+    // IDE から出した提出の判定が決まったとき
+    pub judge: bool,
+    // 残り時間を出しているコンテストが始まったとき
+    pub contest_start: bool,
+}
+
+fn parse_notify(value: &Value, problems: &mut Vec<String>) -> NotifySettings {
+    let mut notify = NotifySettings::default();
+    if let Some(section) = section(value, "notify", problems) {
+        for (key, slot) in [
+            ("judge", &mut notify.judge),
+            ("contestStart", &mut notify.contest_start),
+        ] {
+            match section.get(key) {
+                None => {}
+                Some(Value::Bool(on)) => *slot = *on,
+                Some(_) => problems.push(format!("notify.{key}（true か false にしてください）")),
+            }
+        }
+    }
+    notify
+}
+
 // settings.json の問題文の欄の設定（Phase 15 作業 3。D-196・D-197）
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -316,6 +344,14 @@ pub fn submit_settings(dir: &Path) -> SubmitSettings {
     match reread_settings(dir) {
         Ok(Some(loaded)) => loaded.submit,
         _ => SubmitSettings::default(),
+    }
+}
+
+// 通知を出すかを決めるときに読む（D-239）。読めない・ないときは既定（出さない）
+pub fn notify_settings(dir: &Path) -> NotifySettings {
+    match reread_settings(dir) {
+        Ok(Some(loaded)) => loaded.notify,
+        _ => NotifySettings::default(),
     }
 }
 
@@ -628,10 +664,11 @@ pub struct LoadedSettings {
     pub invalid: Vec<String>,
     pub appearance: Appearance,
     pub submit: SubmitSettings,
+    pub notify: NotifySettings,
     pub problem: ProblemSettings,
     pub cpp: CppSettings,
     pub python: PythonSettings,
-    // 読めなかった見た目・提出・問題文の欄・C++・Python の項目
+    // 読めなかった見た目・提出・通知・問題文の欄・C++・Python の項目
     pub appearance_problems: Vec<String>,
 }
 
@@ -651,6 +688,7 @@ fn parse_settings(value: Value) -> Option<LoadedSettings> {
     }
     let (appearance, mut appearance_problems) = parse_appearance(&value);
     let submit = parse_submit(&value, &mut appearance_problems);
+    let notify = parse_notify(&value, &mut appearance_problems);
     let problem = parse_problem_settings(&value, &mut appearance_problems);
     let cpp = parse_cpp_settings(&value, &mut appearance_problems);
     let python = parse_python_settings(&value, &mut appearance_problems);
@@ -659,6 +697,7 @@ fn parse_settings(value: Value) -> Option<LoadedSettings> {
         invalid,
         appearance,
         submit,
+        notify,
         problem,
         cpp,
         python,
@@ -694,13 +733,14 @@ pub fn settings_stamp(dir: &Path) -> Option<(SystemTime, u64)> {
     Some((metadata.modified().ok()?, metadata.len()))
 }
 
-// 設定の画面の保存（作業 6b。D-159）。今のファイルの keyBindings・colors と、editor・problem・submit・python の
+// 設定の画面の保存（作業 6b。D-159）。今のファイルの keyBindings・colors と、editor・problem・submit・notify・python の
 // 設定の画面で扱う項目だけを入れ替え、ほかの項目は残す（python は interpreter だけ。処理系のパスは残す。Phase 19 作業 3。D-221）。読めないファイル（JSON の誤り・版の違い）には書かない
 pub fn write_settings(
     dir: &Path,
     key_bindings: &[KeyBinding],
     appearance: &Appearance,
     submit: &SubmitSettings,
+    notify: &NotifySettings,
     problem_settings: &ProblemSettings,
     interpreter: Interpreter,
 ) -> Result<(), String> {
@@ -764,6 +804,14 @@ pub fn write_settings(
     );
     merge_section(
         object,
+        "notify",
+        serde_json::json!({
+            "judge": notify.judge,
+            "contestStart": notify.contest_start,
+        }),
+    );
+    merge_section(
+        object,
         "python",
         serde_json::json!({ "interpreter": interpreter }),
     );
@@ -801,6 +849,7 @@ pub fn write_default_settings(dir: &Path) -> Result<(), String> {
             "language": "rust",
         },
         "submit": { "testBeforeSubmit": true, "confirmDialog": true },
+        "notify": { "judge": false, "contestStart": false },
         "cpp": { "compiler": "" },
         "python": { "interpreter": "cpython", "cpython": "", "pypy": "" },
     });
@@ -1210,6 +1259,7 @@ mod tests {
             &bindings,
             &appearance,
             &SubmitSettings::default(),
+            &NotifySettings::default(),
             &ProblemSettings::default(),
             Interpreter::Cpython,
         )
@@ -1244,6 +1294,7 @@ mod tests {
                 &bindings,
                 &bad,
                 &SubmitSettings::default(),
+                &NotifySettings::default(),
                 &ProblemSettings::default(),
                 Interpreter::Cpython
             )
@@ -1258,6 +1309,7 @@ mod tests {
                 &bindings,
                 &appearance,
                 &SubmitSettings::default(),
+                &NotifySettings::default(),
                 &ProblemSettings::default(),
                 Interpreter::Cpython
             )
@@ -1271,6 +1323,7 @@ mod tests {
             &bindings,
             &appearance,
             &SubmitSettings::default(),
+            &NotifySettings::default(),
             &ProblemSettings::default(),
             Interpreter::Cpython,
         )
@@ -1311,19 +1364,50 @@ mod tests {
             test_before_submit: true,
             confirm_dialog: false,
         };
+        let notify = NotifySettings {
+            judge: true,
+            contest_start: false,
+        };
         write_settings(
             &dir.0,
             &[],
             &Appearance::default(),
             &submit,
+            &notify,
             &ProblemSettings::default(),
             Interpreter::Cpython,
         )
         .unwrap();
         assert_eq!(submit_settings(&dir.0), submit);
+        assert_eq!(notify_settings(&dir.0), notify);
         // 初めての起動で作る settings.json にも書く
         write_default_settings(&dir.0).unwrap();
         assert_eq!(submit_settings(&dir.0), SubmitSettings::default());
+        assert_eq!(notify_settings(&dir.0), NotifySettings::default());
+    }
+
+    #[test]
+    fn reads_notify_settings() {
+        let dir = TempDir::new("notify");
+        // なければ・読めなければ、出さない（両方 false）
+        assert_eq!(notify_settings(&dir.0), NotifySettings::default());
+        assert!(!NotifySettings::default().judge && !NotifySettings::default().contest_start);
+        let read = |text: &str| parse_settings(serde_json::from_str(text).unwrap()).unwrap();
+        let loaded = read(r#"{"version": 1, "notify": {"judge": true, "contestStart": "yes"}}"#);
+        assert_eq!(
+            loaded.notify,
+            NotifySettings {
+                judge: true,
+                contest_start: false
+            }
+        );
+        assert_eq!(
+            loaded.appearance_problems,
+            ["notify.contestStart（true か false にしてください）"]
+        );
+        let loaded = read(r#"{"version": 1, "notify": true}"#);
+        assert_eq!(loaded.notify, NotifySettings::default());
+        assert_eq!(loaded.appearance_problems, ["notify"]);
     }
 
     #[test]
@@ -1364,6 +1448,7 @@ mod tests {
                 &[],
                 &Appearance::default(),
                 &SubmitSettings::default(),
+                &NotifySettings::default(),
                 &ProblemSettings::default(),
                 interpreter,
             )
@@ -1473,6 +1558,7 @@ mod tests {
             &[],
             &appearance,
             &SubmitSettings::default(),
+            &NotifySettings::default(),
             &problem,
             Interpreter::Cpython,
         )
@@ -1494,6 +1580,7 @@ mod tests {
                 &[],
                 &appearance,
                 &SubmitSettings::default(),
+                &NotifySettings::default(),
                 &bad,
                 Interpreter::Cpython
             )

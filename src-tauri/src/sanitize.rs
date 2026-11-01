@@ -2,7 +2,8 @@
 //
 // 許可リスト方式：決まった要素だけを残し、属性はすべて捨てる（リンク・スタイル・イベントも残さない）。
 // script などの危ない要素は中身ごと捨て、それ以外の知らない要素（span・a など）は、
-// 要素を外して中の文字だけを残す。画像（img）は、決まった文（IMAGE_NOTE）に置き換える。文字は HTML として読めないように置き換える。
+// 要素を外して中の文字だけを残す。画像（img）は、呼び出し側が決めたもの（IDE が保存した画像の data: の URL か、決まった文）に
+// 置き換える（Phase 23。D-240）。文字は HTML として読めないように置き換える。
 // 出力は IDE がこの規則で組み立て直したものなので、元の HTML の書き方の違いに左右されにくい（推測）
 
 use dom_query::{Document, NodeRef};
@@ -49,8 +50,61 @@ const DROPPED: &[&str] = &[
     "head", "base", "audio", "video", "canvas",
 ];
 
-// 画像の代わりに出す文（Phase 7b 作業 2）。画像は読み込まない（CSP の img-src も 'self' だけ）ので、あったことだけを知らせる
+// 画像の代わりに出す文（Phase 7b 作業 2）。IDE が取得しない画像（img.atcoder.jp 以外など。D-240）は、あったことだけを知らせる
 pub const IMAGE_NOTE: &str = "［画像があります。公式ページで見てください］";
+
+// 問題文の img の、元の属性のうち使うもの（D-240。ほかの属性は見ない）
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageTag {
+    pub src: Option<String>,
+    pub alt: Option<String>,
+    pub width: Option<String>,
+}
+
+// img をどう出すか
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ImageView {
+    // IDE が確かめた画像。mime は IDE の決まった値（image/png など）、base64 は IDE が変換したもの
+    Data { mime: &'static str, base64: String },
+    // 文で知らせる
+    Note(&'static str),
+}
+
+// alt の長さの上限と、width の範囲
+const MAX_ALT_CHARS: usize = 200;
+const MAX_WIDTH: u32 = 2000;
+
+// width は 1〜2000 の整数（数字だけ）のときだけ使う
+fn checked_width(width: Option<&str>) -> Option<u32> {
+    let width = width?.trim();
+    if width.is_empty() || width.len() > 4 || !width.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    width.parse().ok().filter(|w| (1..=MAX_WIDTH).contains(w))
+}
+
+fn write_image(tag: &ImageTag, view: ImageView, out: &mut String) {
+    match view {
+        ImageView::Note(note) => escape(note, out),
+        ImageView::Data { mime, base64 } => {
+            out.push_str("<img src=\"data:");
+            out.push_str(mime);
+            out.push_str(";base64,");
+            out.push_str(&base64);
+            out.push('"');
+            if let Some(alt) = &tag.alt {
+                let alt: String = alt.chars().take(MAX_ALT_CHARS).collect();
+                out.push_str(" alt=\"");
+                escape(&alt, out);
+                out.push('"');
+            }
+            if let Some(width) = checked_width(tag.width.as_deref()) {
+                out.push_str(&format!(" width=\"{width}\""));
+            }
+            out.push('>');
+        }
+    }
+}
 
 // 入れ子の深さの上限（それより深いところは捨てる）
 const MAX_DEPTH: usize = 128;
@@ -68,7 +122,12 @@ fn escape(text: &str, out: &mut String) {
     }
 }
 
-fn walk(node: &NodeRef, depth: usize, out: &mut String) {
+fn walk(
+    node: &NodeRef,
+    depth: usize,
+    image: &mut dyn FnMut(&ImageTag) -> ImageView,
+    out: &mut String,
+) {
     if depth > MAX_DEPTH {
         return;
     }
@@ -84,7 +143,14 @@ fn walk(node: &NodeRef, depth: usize, out: &mut String) {
                 continue;
             }
             if name == "img" {
-                escape(IMAGE_NOTE, out);
+                let attr = |key: &str| child.attr(key).map(|value| value.to_string());
+                let tag = ImageTag {
+                    src: attr("src"),
+                    alt: attr("alt"),
+                    width: attr("width"),
+                };
+                let view = image(&tag);
+                write_image(&tag, view, out);
                 continue;
             }
             if VOID.contains(&name.as_str()) {
@@ -95,25 +161,31 @@ fn walk(node: &NodeRef, depth: usize, out: &mut String) {
                 out.push('<');
                 out.push_str(&name);
                 out.push('>');
-                walk(&child, depth + 1, out);
+                walk(&child, depth + 1, image, out);
                 out.push_str("</");
                 out.push_str(&name);
                 out.push('>');
             } else {
                 // 知らない要素は外して、中だけを残す
-                walk(&child, depth + 1, out);
+                walk(&child, depth + 1, image, out);
             }
         }
         // コメントなどは捨てる
     }
 }
 
-// HTML の断片を無害化する
-pub fn sanitize(fragment: &str) -> String {
+// HTML の断片を無害化する。画像は image で決める（出てくる順に呼ぶ）
+pub fn sanitize_with(fragment: &str, image: &mut dyn FnMut(&ImageTag) -> ImageView) -> String {
     let document = Document::fragment(fragment);
     let mut out = String::new();
-    walk(&document.root(), 0, &mut out);
+    walk(&document.root(), 0, image, &mut out);
     out
+}
+
+// 画像をすべて文にして無害化する
+#[cfg(test)]
+pub fn sanitize(fragment: &str) -> String {
+    sanitize_with(fragment, &mut |_| ImageView::Note(IMAGE_NOTE))
 }
 
 #[cfg(test)]
@@ -180,6 +252,47 @@ mod tests {
         // noscript・template は中身ごと捨てる（文字としても残さない）
         assert!(!out.contains("title="), "{out}");
         assert!(!out.contains("alert(3)"), "{out}");
+    }
+
+    // Phase 23（D-240）：画像は呼び出し側が決めたものだけを出し、元の属性は alt・width を確かめてから付ける
+    #[test]
+    fn writes_only_checked_image_attributes() {
+        let html = r#"<p><img src="https://img.atcoder.jp/x/a.png" alt="図 &quot;1&quot; <b>" width="300" style="max-width: 60%" onerror="alert(1)" class="c"><img src="x" width="300px"><img src="y" width="2001"><img src="z" width="0"></p>"#;
+        let mut seen = Vec::new();
+        let out = sanitize_with(html, &mut |tag| {
+            seen.push(tag.clone());
+            ImageView::Data {
+                mime: "image/png",
+                base64: "QUJD".to_string(),
+            }
+        });
+        assert_eq!(
+            out,
+            "<p><img src=\"data:image/png;base64,QUJD\" alt=\"図 &quot;1&quot; &lt;b&gt;\" width=\"300\"><img src=\"data:image/png;base64,QUJD\"><img src=\"data:image/png;base64,QUJD\"><img src=\"data:image/png;base64,QUJD\"></p>"
+        );
+        assert_eq!(seen.len(), 4);
+        assert_eq!(
+            seen[0].src.as_deref(),
+            Some("https://img.atcoder.jp/x/a.png")
+        );
+        assert_eq!(seen[0].width.as_deref(), Some("300"));
+        // alt は 200 文字まで
+        let long = format!("<img alt=\"{}\">", "あ".repeat(300));
+        let out = sanitize_with(&long, &mut |_| ImageView::Data {
+            mime: "image/gif",
+            base64: String::new(),
+        });
+        assert_eq!(out.matches('あ').count(), 200);
+        // 捨てる要素の中の画像は、呼び出し側に聞かない（数えない）
+        let mut count = 0;
+        sanitize_with(
+            "<noscript><img src=a></noscript><template><img src=b></template><p><img src=c></p>",
+            &mut |_| {
+                count += 1;
+                ImageView::Note(IMAGE_NOTE)
+            },
+        );
+        assert_eq!(count, 1);
     }
 
     #[test]

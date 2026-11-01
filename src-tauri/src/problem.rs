@@ -85,8 +85,8 @@ pub struct Sample {
 // 前回の取得の時刻（アプリ全体で 1 つ）
 static LAST_FETCH: Mutex<Option<Instant>> = Mutex::new(None);
 
-// 前回の取得から MIN_INTERVAL たつまで待つ
-fn wait_for_interval() {
+// 前回の取得から MIN_INTERVAL たつまで待つ（問題文の画像の取得も同じ間隔。D-240）
+pub(crate) fn wait_for_interval() {
     let mut last = LAST_FETCH
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());

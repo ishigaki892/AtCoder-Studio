@@ -1533,6 +1533,8 @@ fn spawn_tracker<R: Runtime>(
                     judge.score.as_deref(),
                 );
             }
+            // 判定が決まったら、設定でオンで窓が手前にないときに知らせる（Phase 22 作業 2。D-239）
+            crate::notify::judge_done(&app, &view);
             emit(&app, &view);
         });
         state.stop_tracking(key);
@@ -2001,11 +2003,13 @@ fn read_mine(remote: &Remote, contest: &str) -> Result<Mine, String> {
     })
 }
 
-// 順位表を読んで、順位・予想パフォーマンス・予想 diff を計算する（Phase 21。D-230〜D-233）。
-// Rated の範囲と開催期間は、ログインなしで読めるコンテストのページから（アプリを開いている間は覚えておく）。
-// 始まる前は順位表を読まない。順位表の中身はメモリの中だけで使う
-fn read_standings(remote: &Remote, contest: &str, user: Option<&str>) -> StandingsOutcome {
-    let info = match crate::standings::contest_info(contest, || {
+// コンテストのトップページ（ログインなしで読める）から、種類と開催期間を読む。
+// アプリを開いている間は覚えておき、2 回目からは読まない（D-230・D-238）。読めなかったときは覚えない
+fn read_contest_info(
+    remote: &Remote,
+    contest: &str,
+) -> Result<crate::standings::ContestInfo, String> {
+    crate::standings::contest_info(contest, || {
         let reply = remote.public(&format!("/contests/{contest}"))?;
         if reply.status == 200 {
             Ok(reply.body)
@@ -2015,7 +2019,31 @@ fn read_standings(remote: &Remote, contest: &str, user: Option<&str>) -> Standin
                 reply.status
             ))
         }
-    }) {
+    })
+}
+
+// ツールバーの残り時間（Phase 22 作業 1。D-238）：コンテストの開始・終了の時刻（UNIX 時間の秒）。
+// 残りの秒数は画面が Mac の時計で数える
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct ContestPeriod {
+    pub start: i64,
+    pub end: i64,
+}
+
+pub fn contest_period(remote: &Remote, contest: &str) -> Result<ContestPeriod, String> {
+    crate::problem::ProblemId::new(contest, "x")?;
+    let info = read_contest_info(remote, contest)?;
+    Ok(ContestPeriod {
+        start: info.start,
+        end: info.end,
+    })
+}
+
+// 順位表を読んで、順位・予想パフォーマンス・予想 diff を計算する（Phase 21。D-230〜D-233）。
+// Rated の範囲と開催期間は、ログインなしで読めるコンテストのページから（アプリを開いている間は覚えておく）。
+// 始まる前は順位表を読まない。順位表の中身はメモリの中だけで使う
+fn read_standings(remote: &Remote, contest: &str, user: Option<&str>) -> StandingsOutcome {
+    let info = match read_contest_info(remote, contest) {
         Ok(info) => info,
         Err(message) => return StandingsOutcome::Failed { message },
     };
@@ -3679,6 +3707,44 @@ mod tests {
         let files: Vec<_> = walk(&dir);
         assert_eq!(files, ["task-lists/x.json", "task-lists/y.json"]);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn reads_the_contest_period_once() {
+        let keychain = TestKeychain::new("contest-period");
+        keychain.0.save("session").unwrap();
+        let now = now_secs();
+        let (base, seen) = fake(Arc::new(move |request: &Request, _| {
+            match request.target.as_str() {
+                "/contests/period22" => ok(&format!(
+                    "{}<span class=\"mr-2\">Rated対象: - </span>",
+                    top_page(now + 600, now + 1200)
+                )),
+                _ => not_found(),
+            }
+        }));
+        let remote = remote(&keychain, &base);
+        let period = contest_period(&remote, "period22").unwrap();
+        assert_eq!(period.end - period.start, 600);
+        assert!((period.start - (now + 600)).abs() <= 60);
+        // 2 回目は覚えたものを使う。ページはセッションなしで読む
+        assert_eq!(contest_period(&remote, "period22").unwrap(), period);
+        {
+            let seen = seen.lock().unwrap();
+            assert_eq!(seen.len(), 1);
+            assert!(!seen[0].head.contains("Cookie:"));
+        }
+        // 読めないときは理由を返し、覚えない（次にまた読む）
+        assert!(
+            contest_period(&remote, "period22b")
+                .unwrap_err()
+                .contains("HTTP 404")
+        );
+        assert!(contest_period(&remote, "period22b").is_err());
+        assert_eq!(seen.lock().unwrap().len(), 3);
+        // コンテストの ID の形が違えば読まない
+        assert!(contest_period(&remote, "../x").is_err());
+        assert_eq!(seen.lock().unwrap().len(), 3);
     }
 
     #[test]

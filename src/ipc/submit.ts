@@ -175,6 +175,20 @@ export function contestStatus(contest: string): Promise<StatusOutcome> {
   return invoke<StatusOutcome>("contest_status", { contest });
 }
 
+// コンテストの開始・終了の時刻（UNIX 時間の秒。Phase 22 作業 1。D-238）。
+// Rust 側がトップページをログインなしで読み、アプリを開いている間は覚えておく
+export type ContestPeriod = { start: number; end: number };
+
+export function contestPeriod(contest: string): Promise<ContestPeriod> {
+  return invoke<ContestPeriod>("contest_period", { contest });
+}
+
+// 残り時間を出しているコンテストを Rust 側に伝える（出していなければ null）。まだ始まっていなければ、Rust 側が
+// 開始まで待ち、始まったときに通知する（設定でオンで、窓が手前にないときだけ。Phase 22 作業 2。D-239）
+export function watchContestStart(contest: string | null): Promise<void> {
+  return invoke("watch_contest_start", { contest });
+}
+
 // ログインの状態が変わった（ログインの窓・提出のとき）
 export function onSession(handler: (view: SessionView) => void): Promise<UnlistenFn> {
   return listen<SessionView>("atcoder-session", (event) => handler(event.payload));

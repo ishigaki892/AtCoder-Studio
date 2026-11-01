@@ -16,6 +16,7 @@ use crate::debug::{
     SourceBreakpoints, StepAction, VariableView,
 };
 use crate::history;
+use crate::images;
 use crate::input_cpp;
 use crate::input_gen;
 use crate::input_py;
@@ -24,15 +25,14 @@ use crate::lsp::{self, LspControl, LspEvent, Started};
 use crate::problem::{self, ProblemId};
 use crate::python::{Interpreter, PythonSettings};
 use crate::run::{self, LogKind, RunControl, RunEvent};
-use crate::sanitize::sanitize;
 use crate::scaffold::{self, ContestCreated, ProblemCreated, ScaffoldControl, ScaffoldEvent};
 use crate::search;
 use crate::session::{self, Keychain, SessionState, SessionView};
 use crate::snippets;
 use crate::sources::{self, ReadOnlySource};
 use crate::storage::{
-    self, Appearance, KeyBinding, Layout, Loaded, LoadedSettings, ProblemSettings, SavedState,
-    SubmitSettings,
+    self, Appearance, KeyBinding, Layout, Loaded, LoadedSettings, NotifySettings, ProblemSettings,
+    SavedState, SubmitSettings,
 };
 use crate::submit::{self, SubmissionView, SubmitOutcome};
 use crate::toolchain::{self, Target};
@@ -1126,6 +1126,8 @@ pub struct ProblemView {
     memory_limit: String,
     statement_html: String,
     sample_count: usize,
+    // 保存していない画像がある（画面は load_problem_images で取得して差し替える。D-240）
+    pending_images: bool,
 }
 
 // 問題を返す。保存してあればそれを使い、なければ（または refresh のとき）取得する（D-110〜D-112）。
@@ -1141,6 +1143,9 @@ pub async fn load_problem(
     let dir = app_dir(&app)?;
     tauri::async_runtime::spawn_blocking(move || {
         let problem = problem::load_problem(&dir, &id, refresh)?;
+        // 保存してある画像だけを出し、ないものは「読み込んでいます」にする（Phase 23。D-240）
+        let (statement_html, pending_images) =
+            images::render(&dir, &id, &problem.statement_html, images::LOADING_NOTE);
         Ok(ProblemView {
             url: id.url(),
             contest: id.contest,
@@ -1148,12 +1153,32 @@ pub async fn load_problem(
             title: problem.title,
             time_limit: problem.time_limit,
             memory_limit: problem.memory_limit,
-            statement_html: sanitize(&problem.statement_html),
+            statement_html,
             sample_count: problem.samples.len(),
+            pending_images,
         })
     })
     .await
     .map_err(|_| "問題を読み込めません".to_string())?
+}
+
+// 保存してある問題の、まだ保存していない画像を取得して、問題文（無害化したもの）を返す（Phase 23。D-240）。
+// 読み込めなかった画像は文で知らせる（覚えないので、次に表示したときにまた読む）
+#[tauri::command]
+pub async fn load_problem_images(
+    contest: String,
+    task: String,
+    app: AppHandle,
+) -> Result<String, String> {
+    let id = ProblemId::new(&contest, &task)?;
+    let dir = app_dir(&app)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let problem = problem::load_saved(&dir, &id)?;
+        images::fetch_missing(&dir, &id, &problem.statement_html, &mut images::fetch_image)?;
+        Ok(images::render(&dir, &id, &problem.statement_html, images::FAILED_NOTE).0)
+    })
+    .await
+    .map_err(|_| "問題文の画像を読み込めません".to_string())?
 }
 
 // コンテストの問題の一覧（選択欄。D-117）。保存してあればそれを使う（D-111）
@@ -1320,6 +1345,23 @@ pub async fn contest_status(
     })
     .await
     .map_err(|_| "提出状況を読めません".to_string())
+}
+
+// ツールバーの残り時間：コンテストの開始・終了の時刻（Phase 22 作業 1。D-238）。
+// コンテストのトップページをログインなしで読み、アプリを開いている間は覚えておく
+#[tauri::command]
+pub async fn contest_period(contest: String) -> Result<submit::ContestPeriod, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        submit::contest_period(&submit::Remote::app(), &contest)
+    })
+    .await
+    .map_err(|_| "開催期間を読めません".to_string())?
+}
+
+// 残り時間を出しているコンテストを伝える（出していなければ null）。始まったときに通知する（Phase 22 作業 2。D-239）
+#[tauri::command]
+pub fn watch_contest_start(contest: Option<String>, app: AppHandle) -> Result<(), String> {
+    crate::notify::watch_contest_start(&app, contest)
 }
 
 // 公式の問題ページをブラウザで開く（取得・読み取りに失敗したときの代替手段。D-110）
@@ -1550,6 +1592,8 @@ pub struct SettingsView {
     appearance: Appearance,
     // 提出の設定（D-162）。画面は表示と設定の画面に使うだけで、提出のときは Rust 側が読み直す
     submit: SubmitSettings,
+    // 通知の設定（D-239）。画面は設定の画面に使うだけで、知らせるときは Rust 側が読み直す
+    notify: NotifySettings,
     // 問題文の欄の設定（D-196・D-197）
     problem: ProblemSettings,
     // Python の設定（Phase 19 作業 3。D-221）。設定の画面は処理系を選ぶのに使う。動かすときは Rust 側が読み直す
@@ -1565,6 +1609,7 @@ impl SettingsView {
             invalid_key_bindings: loaded.invalid,
             appearance: loaded.appearance,
             submit: loaded.submit,
+            notify: loaded.notify,
             problem: loaded.problem,
             python: loaded.python,
             appearance_problems: loaded.appearance_problems,
@@ -1577,6 +1622,7 @@ impl SettingsView {
             invalid_key_bindings: Vec::new(),
             appearance: Appearance::default(),
             submit: SubmitSettings::default(),
+            notify: NotifySettings::default(),
             problem: ProblemSettings::default(),
             python: PythonSettings::default(),
             appearance_problems: Vec::new(),
@@ -1886,14 +1932,17 @@ pub enum SaveSettingsOutcome {
 
 // 設定の画面の保存（作業 6b。D-159）。提出の確認のダイアログを省く設定（submit.confirmDialog を false）に
 // 変えるときは、OS のダイアログで確かめる（D-162。画面だけでは省くようにできない）。
-// async のコマンドはメインスレッドの外で動くので、確認の画面を待ってもメインスレッドは止まらない
+// async のコマンドはメインスレッドの外で動くので、確認の画面を待ってもメインスレッドは止まらない。
+// 通知をオンにしたときは、テストの通知を出す（Phase 22 作業 2。D-239）
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn save_settings(
     app: AppHandle,
     stamp: State<'_, SettingsStamp>,
     key_bindings: Vec<KeyBinding>,
     appearance: Appearance,
     submit: SubmitSettings,
+    notify: NotifySettings,
     problem: ProblemSettings,
     interpreter: Interpreter,
 ) -> Result<SaveSettingsOutcome, String> {
@@ -1923,15 +1972,21 @@ pub async fn save_settings(
             return Ok(SaveSettingsOutcome::ChangedOutside);
         }
     }
+    let notify_before = storage::notify_settings(&dir);
     storage::write_settings(
         &dir,
         &key_bindings,
         &appearance,
         &submit,
+        &notify,
         &problem,
         interpreter,
     )?;
     stamp.update(&dir)?;
+    // 通知をオンにしたら、テストの通知を 1 回出す（初めてなら、ここで macOS が許可の確認を出す。D-239）
+    if crate::notify::turned_on(notify_before, notify) {
+        crate::notify::show_test(&app);
+    }
     Ok(SaveSettingsOutcome::Saved)
 }
 

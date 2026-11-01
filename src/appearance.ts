@@ -59,6 +59,7 @@ export const COLOR_GROUPS: { title: string; items: { name: string; label: string
       { name: "hl-variable", label: "変数" },
       { name: "hl-mod", label: "mod の値" },
       { name: "hl-mod-bg", label: "mod の値の背景" },
+      { name: "problem-image-bg", label: "画像の背景" },
     ],
   },
   {

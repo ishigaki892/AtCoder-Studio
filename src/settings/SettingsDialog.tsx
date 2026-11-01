@@ -15,6 +15,7 @@ import {
   type Appearance,
   type Interpreter,
   type LoadedKeyBinding,
+  type NotifySettings,
   type ProblemSettings,
   type PythonSettings,
   type SubmitSettings,
@@ -43,7 +44,7 @@ type Keys = Omit<KeyBinding, "command">;
 // コマンドごとの割り当て。null は「なし」
 type Assigned = Record<Command, Keys | null>;
 
-type Section = "keys" | "colors" | "view" | "problem" | "submit" | "python" | "snippets" | "templates";
+type Section = "keys" | "colors" | "view" | "problem" | "submit" | "notify" | "python" | "snippets" | "templates";
 
 const MIN_FONT_SIZE = 8;
 const MAX_FONT_SIZE = 32;
@@ -97,6 +98,8 @@ type Props = {
   appearance: Appearance;
   // 今使っている提出の設定（D-162）
   submit: SubmitSettings;
+  // 今の通知の設定（D-239）
+  notify: NotifySettings;
   // 今使っている問題文の欄の設定（D-196・D-197）
   problem: ProblemSettings;
   // 今の Python の設定（D-221）。画面で変えるのは処理系だけ
@@ -105,7 +108,13 @@ type Props = {
   resetSeq: number;
   onClose: () => void;
   // 保存できた。App は見た目と提出の設定を覚える
-  onSaved: (appearance: Appearance, submit: SubmitSettings, problem: ProblemSettings, interpreter: Interpreter) => void;
+  onSaved: (
+    appearance: Appearance,
+    submit: SubmitSettings,
+    notify: NotifySettings,
+    problem: ProblemSettings,
+    interpreter: Interpreter,
+  ) => void;
   // 外で変わっていて保存できなかった。App が読み直す（resetSeq が進む）
   onReload: () => Promise<void>;
   onOpenJson: () => void;
@@ -119,6 +128,7 @@ type Props = {
 function SettingsDialog({
   appearance,
   submit,
+  notify,
   problem,
   python,
   resetSeq,
@@ -134,6 +144,7 @@ function SettingsDialog({
   const [assigned, setAssigned] = useState<Assigned>(currentAssigned);
   const [draft, setDraft] = useState<Appearance>(appearance);
   const [submitDraft, setSubmitDraft] = useState<SubmitSettings>(submit);
+  const [notifyDraft, setNotifyDraft] = useState<NotifySettings>(notify);
   const [problemDraft, setProblemDraft] = useState<ProblemSettings>(problem);
   const [interpreterDraft, setInterpreterDraft] = useState<Interpreter>(python.interpreter);
   const [capturing, setCapturing] = useState<Command | null>(null);
@@ -149,6 +160,7 @@ function SettingsDialog({
     setAssigned(currentAssigned());
     setDraft(appearance);
     setSubmitDraft(submit);
+    setNotifyDraft(notify);
     setProblemDraft(problem);
     setInterpreterDraft(python.interpreter);
     setCapturing(null);
@@ -249,7 +261,7 @@ function SettingsDialog({
     });
     setSaving(true);
     try {
-      const outcome = await saveSettings(bindings, draft, submitDraft, problemDraft, interpreterDraft);
+      const outcome = await saveSettings(bindings, draft, submitDraft, notifyDraft, problemDraft, interpreterDraft);
       if (outcome === "changedOutside") {
         await onReload();
         return;
@@ -259,7 +271,7 @@ function SettingsDialog({
         return;
       }
       setKeyBindings(bindings);
-      onSaved(draft, submitDraft, problemDraft, interpreterDraft);
+      onSaved(draft, submitDraft, notifyDraft, problemDraft, interpreterDraft);
       onClose();
     } catch (e) {
       setNotice(String(e));
@@ -280,6 +292,7 @@ function SettingsDialog({
                 ["view", "表示"],
                 ["problem", "問題文"],
                 ["submit", "提出"],
+                ["notify", "通知"],
                 ["python", "Python"],
                 ["snippets", "スニペット"],
                 ["templates", "テンプレート"],
@@ -319,6 +332,12 @@ function SettingsDialog({
             <SubmitSection
               draft={submitDraft}
               onToggle={(which, on) => setSubmitDraft((current) => ({ ...current, [which]: on }))}
+            />
+          )}
+          {section === "notify" && (
+            <NotifySection
+              draft={notifyDraft}
+              onToggle={(which, on) => setNotifyDraft((current) => ({ ...current, [which]: on }))}
             />
           )}
           {section === "snippets" && (
@@ -592,6 +611,37 @@ function SubmitSection({
         確認のダイアログを出さないようにしても、省くのは、今のソースのサンプルテストがすべて AC で、提出の前の検査の注意がないときだけです。
         サンプルがない問題・目視確認のケースがある問題・注意があるときは、今までどおり確認します。出さないようにして保存するときは、OS
         の確認が出ます。
+      </p>
+    </div>
+  );
+}
+
+// 通知（Phase 22 作業 2。D-239）。知らせるのは IDE の窓が手前にないときだけ。初期値はオフ
+function NotifySection({
+  draft,
+  onToggle,
+}: {
+  draft: NotifySettings;
+  onToggle: (which: "judge" | "contestStart", on: boolean) => void;
+}) {
+  return (
+    <div className="settings-view">
+      <label className="settings-check">
+        <input type="checkbox" checked={draft.judge} onChange={(event) => onToggle("judge", event.target.checked)} />
+        IDE から出した提出の判定が決まったときに知らせる
+      </label>
+      <label className="settings-check">
+        <input
+          type="checkbox"
+          checked={draft.contestStart}
+          onChange={(event) => onToggle("contestStart", event.target.checked)}
+        />
+        ツールバーに残り時間を出しているコンテストが始まったときに知らせる
+      </label>
+      <p className="settings-note">
+        どちらも、IDE の窓が手前にないときだけ知らせます。オンにして保存すると、テストの通知を 1 回出します。初めてのときは macOS
+        が通知を許可するかを聞くので、「許可」を押してください。通知が出ないときは、システム設定の「通知」で「AtCoder
+        Studio」を許可してください（IDE からは、許可されているかが分かりません）。集中モードの間は、バナーが出ません。
       </p>
     </div>
   );

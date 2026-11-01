@@ -56,6 +56,8 @@
   --hl-variable: #7fc8f8;
   --hl-mod: #ff8f8f;
   --hl-mod-bg: rgba(255, 143, 143, 0.16);
+  /* 問題文の画像の背景（Phase 23。D-240）。AtCoder の図は白い背景で見るもので、背景が透明な図の黒い線が暗い背景に埋もれるため */
+  --problem-image-bg: #ffffff;
   /* デバッグ（D-146 2.6）。ブレークポイントの印と、止まった行の背景 */
   --debug-breakpoint: #e5534b;
   --debug-stopped-line: rgba(240, 173, 78, 0.18);
