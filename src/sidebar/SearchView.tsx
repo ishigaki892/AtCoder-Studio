@@ -11,6 +11,7 @@ import {
   type SearchResult,
 } from "../ipc/search";
 import FileIcon from "./FileIcon";
+import { isImeKey } from "../keybindings";
 
 // 入力を止めてから探すまで
 const DEBOUNCE_MS = 300;
@@ -251,7 +252,8 @@ function SearchView({ workspaceName, request, onBeforeSearch, onOpenMatch, onRep
           spellCheck={false}
           onChange={(event) => setPattern(event.target.value)}
           onKeyDown={(event) => {
-            if (event.key === "Enter") {
+            // 日本語入力の変換を確定する Enter では探さない（C-6）
+            if (event.key === "Enter" && !isImeKey(event.nativeEvent)) {
               event.preventDefault();
               void run();
             }

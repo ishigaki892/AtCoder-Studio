@@ -1,5 +1,6 @@
 import type { StepAction } from "../ipc/debug";
 import type { ButtonView, debugButtons } from "./runState";
+import { withShortcut, type Command } from "../keybindings";
 
 type Props = {
   run: ButtonView;
@@ -82,33 +83,51 @@ function RunButtons({
   onDebugStop,
   onSubmit,
 }: Props) {
-  const hint = targetLabel ? `実行の対象：${targetLabel}` : undefined;
+  // マウスを乗せたときの説明：ボタンの名前と今のキー（設定で変えたものに合わせる。D-245）と、実行の対象。
+  // 実行中で「停止」になっているボタンは、停止のキーを出す。キーのないもの（ランダムテストなど）は名前だけ
+  const hint = (view: ButtonView, command: Command | null) => {
+    const name =
+      view.label === "停止" ? withShortcut("停止", "stop") : command ? withShortcut(view.label, command) : view.label;
+    return targetLabel ? `${name}・実行の対象：${targetLabel}` : name;
+  };
   return (
     <div className="run-buttons">
-      <RunButton view={run} hint={hint} onClick={onRun} />
-      <RunButton view={test} hint={hint} onClick={onTest} />
-      <RunButton view={random} hint={hint} onClick={onRandom} />
-      <RunButton view={interactive} hint={hint} onClick={onInteractive} />
+      <RunButton view={run} hint={hint(run, "run")} onClick={onRun} />
+      <RunButton view={test} hint={hint(test, "test")} onClick={onTest} />
+      <RunButton view={random} hint={hint(random, null)} onClick={onRandom} />
+      <RunButton view={interactive} hint={hint(interactive, null)} onClick={onInteractive} />
       {debugging ? (
         <span className="debug-buttons" role="group" aria-label="デバッグの操作">
           <RunButton
             view={debugging.resume}
-            hint={debugging.resume.action === "pause" ? "一時停止（F5）" : "続行（F5）"}
+            hint={withShortcut(debugging.resume.action === "pause" ? "一時停止" : "続行", "debug")}
             onClick={() => onDebugAction(debugging.resume.action)}
           />
-          <RunButton view={debugging.next} hint="ステップオーバー（F10）" onClick={() => onDebugAction("next")} />
-          <RunButton view={debugging.stepIn} hint="ステップイン（F11）" onClick={() => onDebugAction("stepIn")} />
-          <RunButton view={debugging.stepOut} hint="ステップアウト（⇧F11）" onClick={() => onDebugAction("stepOut")} />
-          <RunButton view={debugging.stop} hint="デバッグを止める（⌘.）" onClick={onDebugStop} />
+          <RunButton
+            view={debugging.next}
+            hint={withShortcut("ステップオーバー", "stepOver")}
+            onClick={() => onDebugAction("next")}
+          />
+          <RunButton
+            view={debugging.stepIn}
+            hint={withShortcut("ステップイン", "stepIn")}
+            onClick={() => onDebugAction("stepIn")}
+          />
+          <RunButton
+            view={debugging.stepOut}
+            hint={withShortcut("ステップアウト", "stepOut")}
+            onClick={() => onDebugAction("stepOut")}
+          />
+          <RunButton view={debugging.stop} hint={withShortcut("デバッグを止める", "stop")} onClick={onDebugStop} />
         </span>
       ) : (
-        <RunButton view={debug} hint={hint ? `${hint}（F5）` : undefined} onClick={onDebug} />
+        <RunButton view={debug} hint={hint(debug, "debug")} onClick={onDebug} />
       )}
       {/* プルダウンは付けない（D-016）。送る前に、サンプルテストと Rust 側の確認のダイアログで確かめる（D-162） */}
       <span className="submit-gap">
         <RunButton
           view={submit}
-          hint={submitLabel ? `AtCoder に提出：${submitLabel}（送る前に確かめます）` : undefined}
+          hint={`${withShortcut("提出", "submit")}${submitLabel ? `・AtCoder に提出：${submitLabel}（送る前に確かめます）` : ""}`}
           onClick={onSubmit}
           className="submit-button"
         />

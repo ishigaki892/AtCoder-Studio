@@ -16,7 +16,7 @@ import {
   fitColumns,
   shouldCollapse,
 } from "./layout/sizes";
-import { findCommand, setKeyBindings } from "./keybindings";
+import { findCommand, isImeKey, setKeyBindings, withShortcut } from "./keybindings";
 import { listen } from "@tauri-apps/api/event";
 import {
   cancelClose,
@@ -25,17 +25,21 @@ import {
   openSettingsFile,
   reloadSettings,
   saveAppState,
+  DEFAULT_ATCODER_PROBLEMS_SETTINGS,
   DEFAULT_NOTIFY_SETTINGS,
   DEFAULT_PROBLEM_SETTINGS,
   DEFAULT_PYTHON_SETTINGS,
   type Appearance,
+  type Interpreter,
   type ProblemSettings,
   type PythonSettings,
   type SettingsView,
   type SubmitSettings,
   type NotifySettings,
+  type AtcoderProblemsSettings,
 } from "./ipc/state";
 import SettingsDialog from "./settings/SettingsDialog";
+import SettingsEditor from "./settings/SettingsEditor";
 import PaneBoundary from "./layout/PaneBoundary";
 import type { Command } from "./keybindings";
 import { applyAppearance } from "./appearance";
@@ -78,7 +82,9 @@ import BottomPanel, { type PanelTab } from "./panels/BottomPanel";
 import ProblemPane from "./panels/ProblemPane";
 import ProblemSelector from "./panels/ProblemSelector";
 import ContestClock from "./panels/ContestClock";
+import PastProblems from "./panels/PastProblems";
 import {
+  addTestCase,
   problemChoice,
   packageProblem,
   setProblemChoice,
@@ -111,6 +117,7 @@ import { clearHistory, loadHistory, type HistoryEntry } from "./ipc/history";
 import { startDebug, type FrameView, type StepAction } from "./ipc/debug";
 import RunButtons from "./panels/RunButtons";
 import {
+  UNTRUSTED,
   caseRunBlock,
   debugButtons,
   runButtons,
@@ -264,16 +271,22 @@ const LSP_STATUS_TEXT: Record<Exclude<LspStatus, "none">, string> = {
   failed: "起動に失敗",
 };
 
+// 中央のファイルでないタブの種類（D-242・D-246）と、タブの名前
+type ExtraKind = "past" | "settings";
+const EXTRA_KINDS: ExtraKind[] = ["past", "settings"];
+const EXTRA_LABELS: Record<ExtraKind, string> = { past: "過去問", settings: "設定" };
+
 // 横幅を変えられる列（ファイル一覧・右列）の状態
 type ColumnState = { width: number; visible: boolean };
 // サイドバーの中身（Phase 12 作業 1。D-182）。エクスプローラー（ファイル一覧）・検索・実行とデバッグ・
 // コンテスト（Phase 18 作業 4。D-218）
 type SidebarView = "files" | "search" | "debug" | "contest";
-const SIDEBAR_VIEWS: { view: SidebarView; label: string }[] = [
-  { view: "files", label: "エクスプローラー" },
-  { view: "search", label: "検索" },
-  { view: "debug", label: "実行とデバッグ" },
-  { view: "contest", label: "コンテスト" },
+// command は、マウスを乗せたときにキーを出すのに使う（D-245）
+const SIDEBAR_VIEWS: { view: SidebarView; label: string; command: Command }[] = [
+  { view: "files", label: "エクスプローラー", command: "showExplorer" },
+  { view: "search", label: "検索", command: "showSearch" },
+  { view: "debug", label: "実行とデバッグ", command: "showDebug" },
+  { view: "contest", label: "コンテスト", command: "showContest" },
 ];
 function SidebarIcon({ view }: { view: SidebarView }) {
   switch (view) {
@@ -357,6 +370,10 @@ function App() {
   });
   // 通知の設定（Phase 22 作業 2。D-239）。設定の画面に使う。知らせるかは Rust 側が読み直して決める
   const [notifySettings, setNotifySettings] = useState<NotifySettings>(DEFAULT_NOTIFY_SETTINGS);
+  // AtCoder Problems の設定（Phase 24。D-241）。過去問の表に ID を渡すのと、設定の画面に使う
+  const [atcoderProblemsSettings, setAtcoderProblemsSettings] = useState<AtcoderProblemsSettings>(
+    DEFAULT_ATCODER_PROBLEMS_SETTINGS,
+  );
   // 問題文の欄の設定（Phase 15 作業 3。D-196・D-197）
   const [problemSettings, setProblemSettings] = useState<ProblemSettings>(DEFAULT_PROBLEM_SETTINGS);
   // Python の設定（Phase 19 作業 3。D-221）。設定の画面に使う。動かすときは Rust 側が読み直す
@@ -965,6 +982,25 @@ function App() {
     }
   }
 
+  // 「テストケースを足す」（Phase 25 作業 1。D-243）。実行の対象のテストケースのフォルダに sample-N として足す
+  async function handleAddCase(input: string, expected: string): Promise<boolean> {
+    if (!target) {
+      return false;
+    }
+    try {
+      const added = await addTestCase(target, input, expected);
+      const where = added.folder ? `${added.folder}/` : "";
+      setTestNotice(
+        `${where}${added.name}.in${expected.trim() === "" ? "" : ` と ${added.name}.out`} を足しました。サンプルテストを実行すると使われます`,
+      );
+      setTreeRefreshKey((key) => key + 1);
+      return true;
+    } catch (e) {
+      setTestNotice(`テストケースを足せませんでした：${String(e)}`);
+      return false;
+    }
+  }
+
   // 信頼し直す（確認の画面は Rust 側。D-172）
   async function handleTrust() {
     try {
@@ -1019,6 +1055,46 @@ function App() {
 
   // 起動したときに、保存してあったレイアウト・キー割り当て・前回の作業領域とタブを戻す（作業 6）
   const [restored, setRestored] = useState(false);
+  // 中央のファイルでないタブ（Phase 24 の「過去問」〔D-242〕・Phase 26 の「設定」〔D-246〕）。ファイルのタブとは別に持つ
+  // （保存・LSP などの対象にしない）。手前にあるときは、エディタを隠して（消さずに）中身を出す
+  const [extraOpen, setExtraOpen] = useState<ExtraKind[]>([]);
+  const [extraActive, setExtraActive] = useState<ExtraKind | null>(null);
+  // state.json から読んだもの（起動のときの読み戻しに使う）
+  const savedExtraRef = useRef<Record<ExtraKind, string>>({ past: "closed", settings: "closed" });
+  // ファイルのタブが替わったら（開いた・選んだ・デバッグで止まった行へ移ったなど）、ファイルでないタブから離れる。
+  // 手前だったファイルのタブを閉じた・消した・名前を変えたことで替わったときは離れない（裏のタブを閉じても、
+  // 設定・過去問のタブは手前のまま。C-8）
+  const previousActiveRef = useRef(tabs.activePath);
+  useEffect(() => {
+    const previous = previousActiveRef.current;
+    previousActiveRef.current = tabs.activePath;
+    if (previous !== null && !tabs.tabs.some((tab) => tab.path === previous)) {
+      return;
+    }
+    setExtraActive(null);
+  }, [tabs.activePath]);
+  // 起動のときの読み戻し。上の effect より後に置く（同じ描画でタブを開き直しても、こちらが後で決める）
+  useEffect(() => {
+    if (!restored) {
+      return;
+    }
+    const saved = savedExtraRef.current;
+    const open = EXTRA_KINDS.filter((kind) => saved[kind] === "open" || saved[kind] === "active");
+    if (open.length > 0) {
+      setExtraOpen(open);
+      setExtraActive(EXTRA_KINDS.find((kind) => saved[kind] === "active") ?? null);
+    }
+  }, [restored]);
+  function openExtra(kind: ExtraKind) {
+    setExtraOpen((current) => (current.includes(kind) ? current : [...current, kind]));
+    setExtraActive(kind);
+  }
+  function closeExtra(kind: ExtraKind) {
+    setExtraOpen((current) => current.filter((item) => item !== kind));
+    setExtraActive((current) => (current === kind ? null : current));
+  }
+  const extraState = (kind: ExtraKind) =>
+    extraOpen.includes(kind) ? (extraActive === kind ? "active" : "open") : "closed";
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -1031,6 +1107,7 @@ function App() {
         setAppearance(startup.settings.appearance);
         setSubmitSettings(startup.settings.submit);
         setNotifySettings(startup.settings.notify);
+        setAtcoderProblemsSettings(startup.settings.atcoderProblems);
         setProblemSettings(startup.settings.problem);
         setPythonSettings(startup.settings.python);
         if (settingsProblem) {
@@ -1041,6 +1118,7 @@ function App() {
           const l = startup.layout;
           setSidebar({ width: l.sidebarWidth, visible: l.sidebarVisible });
           setSidebarView(sidebarViewOf(l.sidebarView));
+          savedExtraRef.current = { past: l.pastProblems ?? "closed", settings: l.settingsTab ?? "closed" };
           setRightColumn({ width: l.rightWidth, visible: l.rightVisible });
           setBottomPanel({ ratio: l.bottomRatio, visible: l.bottomVisible });
           setBottomRightPanel({ ratio: l.bottomRightRatio, visible: l.bottomRightVisible });
@@ -1073,6 +1151,8 @@ function App() {
 
   async function handleOpenFile(path: string) {
     setError(null);
+    // すでに手前のファイルを開き直したときも、ファイルでないタブから離れる
+    setExtraActive(null);
     await tabs.open(path);
   }
 
@@ -1199,12 +1279,21 @@ function App() {
     if (command === "toggleSidebar") {
       toggleSidebar();
     } else if (command === "save") {
+      // 過去問のタブが手前のときは、隠れているファイルを保存しない
+      if (extraActive !== null) {
+        return;
+      }
       // ⌘S：整形してから、すぐ保存する（D-135）。整形できなければ、整形せずに保存する
       void (async () => {
         await formatBeforeSave(tabs.activePath);
         await tabs.saveActive();
       })();
     } else if (command === "closeTab") {
+      // 過去問のタブが手前なら、それを閉じる（隠れているファイルのタブは閉じない）
+      if (extraActive !== null) {
+        closeExtra(extraActive);
+        return;
+      }
       // 開いているタブがなければ何もしない
       if (tabs.activePath) {
         setError(null);
@@ -1265,13 +1354,38 @@ function App() {
       showSidebarView("search");
     } else if (command === "showDebug") {
       showSidebarView("debug");
+    } else if (command === "showContest") {
+      showSidebarView("contest");
     }
   }
 
   // 設定の画面を開く（作業 6b）。開く前に settings.json を読み直し、外での変更を画面に入れる
+  // 設定の画面の形（Phase 26。D-246）が VS Code 風なら、中央の「設定」のタブで開く
   async function openSettings() {
-    await reloadSettingsOnFocus();
-    setSettingsOpen(true);
+    // 外で settingsUi を変えた直後も、読み直した値で形を決める（C-9）
+    const current = await reloadSettingsReporting();
+    if (current?.settingsUi === "editor") {
+      openExtra("settings");
+    } else {
+      setSettingsOpen(true);
+    }
+  }
+
+  // 設定の画面で保存できた（今の形・VS Code 風の両方）。App は見た目と各設定を覚える
+  function saveSettingsState(
+    saved: Appearance,
+    submit: SubmitSettings,
+    notify: NotifySettings,
+    atcoderProblems: AtcoderProblemsSettings,
+    problem: ProblemSettings,
+    interpreter: Interpreter,
+  ) {
+    setAppearance(saved);
+    setSubmitSettings(submit);
+    setNotifySettings(notify);
+    setAtcoderProblemsSettings(atcoderProblems);
+    setProblemSettings(problem);
+    setPythonSettings((current) => ({ ...current, interpreter }));
   }
 
   // settings.json を既定のテキストエディタで開く（設定の画面の「JSON で開く」）
@@ -1326,6 +1440,10 @@ function App() {
     function handleKeyDown(event: KeyboardEvent) {
       // 設定の画面を開いている間は、キー割り当ての操作をしない（画面がキーを受け取る）
       if (settingsOpenRef.current) {
+        return;
+      }
+      // 日本語入力の変換中のキー（F6〜F10 の変換など）は、入力に任せる（C-5）
+      if (isImeKey(event)) {
         return;
       }
       const command = findCommand(event);
@@ -1410,6 +1528,11 @@ function App() {
 
   // 読めないときは、今の設定のまま知らせる（退避はしない。D-159）
   async function reloadSettingsOnFocus() {
+    await reloadSettingsReporting();
+  }
+  // 読み直して、今の見た目の設定を返す（変わっていなければ今のもの、読めなければ null）。React の状態は同じ処理の中では
+  // 新しくならないので、読み直した値をすぐ使うときはこちらを使う（C-9）
+  async function reloadSettingsReporting(): Promise<Appearance | null> {
     try {
       const settings = await reloadSettings();
       if (settings) {
@@ -1417,12 +1540,16 @@ function App() {
         setAppearance(settings.appearance);
         setSubmitSettings(settings.submit);
         setNotifySettings(settings.notify);
+        setAtcoderProblemsSettings(settings.atcoderProblems);
         setProblemSettings(settings.problem);
         setPythonSettings(settings.python);
         setSettingsSeq((seq) => seq + 1);
+        return settings.appearance;
       }
+      return appearance;
     } catch (e) {
       setError(String(e));
+      return appearance;
     }
   }
   const focusHandlersRef = useRef({ blur: tabs.saveAll, focus: refreshOnFocus });
@@ -1451,6 +1578,8 @@ function App() {
         bottomRightRatio: bottomRightPanel.ratio,
         bottomRightVisible: bottomRightPanel.visible,
         sidebarView,
+        pastProblems: extraState("past"),
+        settingsTab: extraState("settings"),
       },
       // 読み取り専用のタブ（作業領域の外のソース）は、再起動では戻さない
       tabs.tabs.filter((tab) => !tab.readOnly).map((tab) => tab.path),
@@ -1472,7 +1601,19 @@ function App() {
     }, 500);
     return () => clearTimeout(timer);
     // persistState は上の値だけを使う
-  }, [restored, sidebar, sidebarView, rightColumn, bottomPanel, bottomRightPanel, tabPaths, tabs.activePath, workspaceName]);
+  }, [
+    restored,
+    sidebar,
+    sidebarView,
+    rightColumn,
+    bottomPanel,
+    bottomRightPanel,
+    tabPaths,
+    tabs.activePath,
+    workspaceName,
+    extraOpen,
+    extraActive,
+  ]);
 
   // ウィンドウを閉じる・アプリを終える前に、未保存のタブと state.json を保存する（D-084）。
   // Rust 側が閉じるのを止めて "close-requested" を送ってくる。保存できたら閉じる。保存できないタブがあれば、
@@ -1551,14 +1692,14 @@ function App() {
       {/* アクティビティバー（D-042・D-045）：サイドバーの中身の「エクスプローラー」「検索」「実行とデバッグ」（D-182）・「コンテスト」（D-218）。
           いま出している中身を押すとサイドバーを閉じる。下端に「設定」（D-159） */}
       <nav className="activitybar">
-        {SIDEBAR_VIEWS.map(({ view, label }) => {
+        {SIDEBAR_VIEWS.map(({ view, label, command }) => {
           const selected = sidebar.visible && sidebarView === view;
           return (
             <button
               key={view}
               type="button"
               className={`activitybar-item ${selected ? "selected" : ""}`}
-              title={label}
+              data-tip={withShortcut(label, command)}
               aria-label={label}
               aria-pressed={selected}
               onClick={() => showSidebarView(view)}
@@ -1570,7 +1711,7 @@ function App() {
         <button
           type="button"
           className="activitybar-item activitybar-bottom"
-          title="設定"
+          data-tip={withShortcut("設定", "openSettings")}
           aria-label="設定"
           onClick={() => void openSettings()}
         >
@@ -1674,6 +1815,7 @@ function App() {
               submissions={submissions}
               onSelectTask={(id) => void openContestTask(id)}
               onLogin={() => void handleLogin()}
+              onOpenPast={() => openExtra("past")}
             />
           </PaneBoundary>
         </div>
@@ -1741,7 +1883,7 @@ function App() {
       <div className="center-column" ref={centerColumnRef}>
         {/* エディタ（CodeMirror 6）。ファイルの読み書きは作業 4・5 で加える */}
         <main
-          className="editor"
+          className={`editor ${extraActive !== null ? "extra-active" : ""}`}
           style={{ flexGrow: bottomPanel.visible ? 1 - bottomPanel.ratio : 1 }}
         >
           {/* サイドバーを閉じているとき（⌘B）も、知らせが見えるように、エディタの上にも出す（Phase 10 作業 7） */}
@@ -1757,18 +1899,58 @@ function App() {
           <TabBar
             tabs={tabs.tabs}
             activePath={tabs.activePath}
-            onSelect={tabs.setActivePath}
+            extras={extraOpen.map((kind) => ({
+              label: EXTRA_LABELS[kind],
+              active: extraActive === kind,
+              onSelect: () => setExtraActive(kind),
+              onClose: () => closeExtra(kind),
+            }))}
+            onSelect={(path) => {
+              setExtraActive(null);
+              tabs.setActivePath(path);
+            }}
             onClose={(path) => {
               setError(null);
               void tabs.close(path);
             }}
           />
-          {activeTab?.readOnly && (
+          {/* 設定2は、開いている間は画面に置いたままにし、手前でないときは隠す（検索語・選んだ分類を残す。C-8） */}
+          {extraOpen.includes("settings") && appearance && (
+            <SettingsEditor
+              hidden={extraActive !== "settings"}
+              appearance={appearance}
+              submit={submitSettings}
+              notify={notifySettings}
+              atcoderProblems={atcoderProblemsSettings}
+              problem={problemSettings}
+              python={pythonSettings}
+              resetSeq={settingsSeq}
+              onSaved={saveSettingsState}
+              onReload={reloadSettingsOnFocus}
+              onOpenJson={openSettingsJson}
+              snippets={snippetsView}
+              onOpenSnippets={(language) => openSnippetsFile(language)}
+              onImportSnippets={importSnippets}
+              onSwitchToDialog={() => {
+                closeExtra("settings");
+                setSettingsOpen(true);
+              }}
+            />
+          )}
+          {extraActive === "past" && (
+            <PastProblems
+              user={atcoderProblemsSettings.user}
+              loggedIn={session?.loggedIn ?? false}
+              current={currentProblem}
+              onSelect={showProblem}
+            />
+          )}
+          {extraActive === null && activeTab?.readOnly && (
             <div className="readonly-banner" title={activeTab.readOnly.location}>
               読み取り専用：{activeTab.readOnly.location}
             </div>
           )}
-          <Breadcrumbs tab={activeTab} onOpenFile={(path) => void handleOpenFile(path)} />
+          {extraActive === null && <Breadcrumbs tab={activeTab} onOpenFile={(path) => void handleOpenFile(path)} />}
           <Editor
             activeKey={activeTab?.path ?? null}
             stateOf={tabs.stateOf}
@@ -1816,6 +1998,8 @@ function App() {
             }
             onEvaluate={(expression) => void handleEvaluate(expression)}
             onSaveExpected={(result) => void handleSaveExpected(result)}
+            addCaseBlocked={untrusted ? UNTRUSTED : target ? null : "実行の対象のファイルを開いてください"}
+            onAddCase={handleAddCase}
             testNotice={testNotice}
             history={workspaceName === null ? null : history}
             onClearHistory={() => void handleClearHistory()}
@@ -1886,22 +2070,18 @@ function App() {
           appearance={appearance}
           submit={submitSettings}
           notify={notifySettings}
+          atcoderProblems={atcoderProblemsSettings}
           problem={problemSettings}
           python={pythonSettings}
           resetSeq={settingsSeq}
           onClose={() => setSettingsOpen(false)}
-          onSaved={(saved, submit, notify, problem, interpreter) => {
-            setAppearance(saved);
-            setSubmitSettings(submit);
-            setNotifySettings(notify);
-            setProblemSettings(problem);
-            setPythonSettings((current) => ({ ...current, interpreter }));
-          }}
+          onSaved={saveSettingsState}
           onReload={reloadSettingsOnFocus}
           onOpenJson={openSettingsJson}
           snippets={snippetsView}
           onOpenSnippets={(language) => openSnippetsFile(language)}
           onImportSnippets={importSnippets}
+          onSwitchToEditor={() => openExtra("settings")}
         />
         </PaneBoundary>
       )}

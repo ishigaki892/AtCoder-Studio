@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-past-problems"
+description = "Enables the past_problems command without any pre-configured scope."
+commands.allow = ["past_problems"]
+
+[[permission]]
+identifier = "deny-past-problems"
+description = "Denies the past_problems command without any pre-configured scope."
+commands.deny = ["past_problems"]

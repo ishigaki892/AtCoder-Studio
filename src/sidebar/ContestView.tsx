@@ -2,7 +2,8 @@
 // 問題文の欄の問題のコンテストについて、問題ごとに AC・最後の判定・回数を出す。
 // 読むのは、開いたとき（前に読んでから 1 分たっていれば）・コンテストが替わったとき・「更新」・ログインしたときだけ。
 // IDE から出した提出は、通信せずに行に重ねる（判定を追っている間も、その表記を出す）。
-// 続けて順位表を読み、自分の順位・予想パフォーマンス・各問題の予想 diff を出す（Phase 21。D-230〜D-233）
+// 続けて順位表を読み、自分の順位・予想パフォーマンス・各問題の予想 diff を出す（Phase 21。D-230〜D-233）。
+// AtCoder Problems の diff がある問題（終わったコンテスト）は、そちらを出す（Phase 24。D-241）
 import { useEffect, useRef, useState } from "react";
 import type { ProblemId } from "../ipc/problem";
 import {
@@ -13,6 +14,8 @@ import {
   type SubmissionView,
 } from "../ipc/submit";
 import { overlaySubmissions } from "./contestStatus";
+import { ratingClass } from "../rating";
+import { difficultyHint, difficultyText, problemDifficulties, type DifficultyView } from "../ipc/atcoderProblems";
 
 // 開き直したときに読み直すまでの間
 const STALE_MS = 60_000;
@@ -29,6 +32,8 @@ type Props = {
   submissions: SubmissionView[];
   onSelectTask: (id: ProblemId) => void;
   onLogin: () => void;
+  // 中央の「過去問」のタブを開く（Phase 24。D-242）
+  onOpenPast: () => void;
 };
 
 type Entry = {
@@ -50,13 +55,6 @@ const PERFORMANCE_HINT =
 // 予想 diff の説明（D-232）
 const DIFFICULTY_HINT = "AtCoder Problems と同じ方法で、順位表から推定した難易度（50% の確率で解けるレート）です";
 
-// レートの色（400 ごと。灰・茶・緑・水・青・黄・橙・赤。2800 以上は赤）の class（D-230）
-const RATING_COLORS = ["gray", "brown", "green", "cyan", "blue", "yellow", "orange", "red"];
-
-function ratingClass(value: number): string {
-  const band = Math.min(Math.max(Math.floor(value / 400), 0), RATING_COLORS.length - 1);
-  return `rating-${RATING_COLORS[band]}`;
-}
 
 // 順位の表示（同順位の平均は小数で出る）
 function rankText(rank: number): string {
@@ -71,7 +69,16 @@ function clock(ms: number): string {
   return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
 }
 
-function ContestView({ contest, currentTask, visible, loggedIn, submissions, onSelectTask, onLogin }: Props) {
+function ContestView({
+  contest,
+  currentTask,
+  visible,
+  loggedIn,
+  submissions,
+  onSelectTask,
+  onLogin,
+  onOpenPast,
+}: Props) {
   const [entry, setEntry] = useState<Entry | null>(null);
   const [loading, setLoading] = useState(false);
   // 読む順番（遅れて届いた、前のコンテストの結果を使わない）
@@ -131,6 +138,32 @@ function ContestView({ contest, currentTask, visible, loggedIn, submissions, onS
     void read(contest);
   }, [visible, contest]);
 
+  // 問題の行の AtCoder Problems の diff（Phase 24。D-241）。行の問題が変わったときだけ聞く
+  const [apDiffs, setApDiffs] = useState<Record<string, DifficultyView>>({});
+  const taskIds = entry?.status && entry.status.contest === contest ? entry.status.tasks.map((task) => task.task) : [];
+  const taskKey = taskIds.join(",");
+  useEffect(() => {
+    if (!visible || taskIds.length === 0) {
+      return;
+    }
+    let cancelled = false;
+    problemDifficulties(taskIds)
+      .then((found) => {
+        if (!cancelled) {
+          setApDiffs(found);
+        }
+      })
+      .catch(() => {
+        // 読めなければ、順位表からの予想 diff だけを出す
+        if (!cancelled) {
+          setApDiffs({});
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [visible, taskKey]);
+
   // ログインしたら、ログインを促していたときだけ読み直す
   useEffect(() => {
     if (loggedIn && visible && contest && entry?.notLoggedIn) {
@@ -143,6 +176,9 @@ function ContestView({ contest, currentTask, visible, loggedIn, submissions, onS
       <div className="contest-view">
         <div className="sidebar-title">コンテスト</div>
         <p className="contest-note">問題文の欄で問題を選ぶと、そのコンテストの提出状況が出ます。</p>
+        <button type="button" className="contest-link" onClick={onOpenPast}>
+          過去問の一覧
+        </button>
       </div>
     );
   }
@@ -203,13 +239,15 @@ function ContestView({ contest, currentTask, visible, loggedIn, submissions, onS
           const mark = task.accepted ? "✓" : task.count > 0 ? "✗" : "・";
           const state = task.accepted ? "accepted" : task.count > 0 ? "tried" : "none";
           const verdict = task.accepted ? "AC" : task.last ? `${task.last}（${task.count} 回）` : "未提出";
-          const difficulty = difficulties.get(task.task) ?? null;
+          const apDiff = apDiffs[task.task] ?? null;
+          // AtCoder Problems の diff がなければ（開催中・直後など）、順位表からの予想 diff
+          const difficulty = apDiff ? null : (difficulties.get(task.task) ?? null);
           return (
             <li key={task.task}>
               <button
                 type="button"
                 className={`contest-task contest-task-${state} ${task.task === currentTask ? "current" : ""}`}
-                title={`${task.label ? `${task.label} - ` : ""}${task.title}${difficulty !== null ? `\n予想 diff ${difficulty}：${DIFFICULTY_HINT}` : ""}`}
+                title={`${task.label ? `${task.label} - ` : ""}${task.title}${apDiff ? `\n${difficultyText(apDiff)}：${difficultyHint(apDiff)}` : ""}${difficulty !== null ? `\n予想 diff ${difficulty}：${DIFFICULTY_HINT}` : ""}`}
                 onClick={() => onSelectTask({ contest, task: task.task })}
               >
                 <span className="contest-mark" aria-hidden="true">
@@ -217,6 +255,9 @@ function ContestView({ contest, currentTask, visible, loggedIn, submissions, onS
                 </span>
                 <span className="contest-label">{task.label}</span>
                 <span className="contest-name">{task.title}</span>
+                {apDiff && (
+                  <span className={`contest-diff ${ratingClass(apDiff.value)}`}>{difficultyText(apDiff)}</span>
+                )}
                 {difficulty !== null && (
                   <span className={`contest-diff ${ratingClass(difficulty)}`}>diff {difficulty}</span>
                 )}
@@ -232,6 +273,9 @@ function ContestView({ contest, currentTask, visible, loggedIn, submissions, onS
         onClick={() => void openSubmissionPage(contest, null).catch(() => {})}
       >
         自分の提出を開く
+      </button>
+      <button type="button" className="contest-link" onClick={onOpenPast}>
+        過去問の一覧
       </button>
     </div>
   );

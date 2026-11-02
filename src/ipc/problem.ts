@@ -47,6 +47,11 @@ export function openProblemPage(id: ProblemId): Promise<void> {
   return invoke<void>("open_problem_page", { ...id });
 }
 
+// 問題の解説の一覧（https://atcoder.jp/contests/<コンテスト>/tasks/<問題>/editorial）を既定のブラウザで開く（Phase 25 作業 2。D-244）
+export function openEditorialPage(id: ProblemId): Promise<void> {
+  return invoke<void>("open_editorial_page", { ...id });
+}
+
 // パッケージで選んだ問題（D-117）。なければ null
 export function problemChoice(packagePath: string): Promise<ProblemId | null> {
   return invoke<ProblemId | null>("problem_choice", { package: packagePath });
@@ -69,6 +74,14 @@ export type SavedSamples = {
 // サンプルを、実行の対象のテストケースのフォルダ（D-106）に書く。すでにあるファイルは上書きしない
 export function saveSamples(target: Target, id: ProblemId): Promise<SavedSamples> {
   return invoke<SavedSamples>("save_samples", { target, ...id });
+}
+
+// 貼り付けたテストケースを、実行の対象のテストケースのフォルダに sample-N として足す（Phase 25 作業 1。D-243）。
+// 期待出力が空なら .in だけ（目視確認のケース）。name は足したケース（sample-N）、folder はパッケージからの場所
+export type AddedCase = { name: string; folder: string };
+
+export function addTestCase(target: Target, input: string, expected: string): Promise<AddedCase> {
+  return invoke<AddedCase>("add_test_case", { target, input, expected });
 }
 
 // 問題文から作った input! の中身（Phase 15。D-194。Rust 側は src-tauri/src/input_gen.rs）。

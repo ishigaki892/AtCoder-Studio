@@ -31,8 +31,8 @@ use crate::session::{self, Keychain, SessionState, SessionView};
 use crate::snippets;
 use crate::sources::{self, ReadOnlySource};
 use crate::storage::{
-    self, Appearance, KeyBinding, Layout, Loaded, LoadedSettings, NotifySettings, ProblemSettings,
-    SavedState, SubmitSettings,
+    self, Appearance, AtcoderProblemsSettings, KeyBinding, Layout, Loaded, LoadedSettings,
+    NotifySettings, ProblemSettings, SavedState, SubmitSettings,
 };
 use crate::submit::{self, SubmissionView, SubmitOutcome};
 use crate::toolchain::{self, Target};
@@ -1181,6 +1181,82 @@ pub async fn load_problem_images(
     .map_err(|_| "問題文の画像を読み込めません".to_string())?
 }
 
+// 問題ごとの AtCoder Problems の diff（Phase 24 作業 1。D-241）。ないものは入れない。
+// 難易度のデータは保存してあればそれを使い、保存から 24 時間たっていたら読み直す（読めなければ古いものを使う）
+#[tauri::command]
+pub async fn problem_difficulties(
+    ids: Vec<String>,
+    app: AppHandle,
+) -> Result<std::collections::HashMap<String, crate::atcoder_problems::DifficultyView>, String> {
+    let dir = app_dir(&app)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::atcoder_problems::difficulties(
+            &dir,
+            &ids,
+            std::time::SystemTime::now(),
+            &mut crate::atcoder_problems::fetch,
+        )
+    })
+    .await
+    .map_err(|_| "AtCoder Problems の diff を読めません".to_string())?
+}
+
+// 過去問の表の AC 状況に使う、ログインしているアカウントの ID（2026-11-02、ユーザーの選択）。
+// ログインしていなければ None。ID はログインのとき・提出のときに覚える（アプリを開き直すと分からない）ので、
+// 分からないときだけ、AtCoder のトップページをセッション付きで 1 回読んで覚える（アプリを開いている間は読み直さない）
+fn logged_in_user(app: &AppHandle) -> Option<String> {
+    let keychain = Keychain::app();
+    if !keychain.exists().unwrap_or(false) {
+        return None;
+    }
+    let state = app.state::<SessionState>();
+    if let Some(user) = state.user() {
+        return Some(user);
+    }
+    problem::wait_for_interval();
+    let reply = session::Client::app()
+        .request("https://atcoder.jp/", &[])
+        .ok()?;
+    let user = session::user_screen_name(&reply.body)?;
+    state.set_user(Some(user.clone()));
+    Some(user)
+}
+
+// 中央の「過去問」のタブの表（Phase 24 作業 2。D-242）。category は abc・arc・agc。
+// refresh（「更新」）なら、データのファイルも 24 時間を待たずに読み直し、提出の続きを読む。
+// 開いたときは、提出は前回から 1 分たっていれば続きを読む。AtCoder の ID は設定から読み、
+// 空ならログインしているアカウントの ID を使う
+#[tauri::command]
+pub async fn past_problems(
+    category: String,
+    refresh: bool,
+    app: AppHandle,
+) -> Result<crate::atcoder_problems::PastView, String> {
+    let dir = app_dir(&app)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let user = storage::atcoder_problems_settings(&dir).user;
+        let user = if user.is_empty() {
+            logged_in_user(&app)
+        } else {
+            Some(user)
+        };
+        let read = user
+            .as_deref()
+            .is_some_and(|user| crate::atcoder_problems::should_read_submissions(user, refresh));
+        crate::atcoder_problems::past_view(
+            &dir,
+            &category,
+            user.as_deref(),
+            refresh,
+            read,
+            std::time::SystemTime::now(),
+            &mut crate::atcoder_problems::fetch,
+        )
+    })
+    .await
+    .map_err(|_| "過去問の表を読めません".to_string())?
+}
+
 // コンテストの問題の一覧（選択欄。D-117）。保存してあればそれを使う（D-111）
 #[tauri::command]
 pub async fn load_task_list(
@@ -1348,11 +1424,15 @@ pub async fn contest_status(
 }
 
 // ツールバーの残り時間：コンテストの開始・終了の時刻（Phase 22 作業 1。D-238）。
-// コンテストのトップページをログインなしで読み、アプリを開いている間は覚えておく
+// コンテストのトップページをログインなしで読み、アプリを開いている間は覚えておく。
+// refresh なら読み直す（覚えている終了時刻を過ぎたとき。延長に追いつくため。C-3）
 #[tauri::command]
-pub async fn contest_period(contest: String) -> Result<submit::ContestPeriod, String> {
+pub async fn contest_period(
+    contest: String,
+    refresh: bool,
+) -> Result<submit::ContestPeriod, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        submit::contest_period(&submit::Remote::app(), &contest)
+        submit::contest_period(&submit::Remote::app(), &contest, refresh)
     })
     .await
     .map_err(|_| "開催期間を読めません".to_string())?
@@ -1362,6 +1442,12 @@ pub async fn contest_period(contest: String) -> Result<submit::ContestPeriod, St
 #[tauri::command]
 pub fn watch_contest_start(contest: Option<String>, app: AppHandle) -> Result<(), String> {
     crate::notify::watch_contest_start(&app, contest)
+}
+
+// 問題の解説の一覧を既定のブラウザで開く（Phase 25 作業 2。D-244）。IDE は AtCoder を読まない
+#[tauri::command]
+pub fn open_editorial_page(contest: String, task: String) -> Result<(), String> {
+    problem::open_editorial(&ProblemId::new(&contest, &task)?)
 }
 
 // 公式の問題ページをブラウザで開く（取得・読み取りに失敗したときの代替手段。D-110）
@@ -1395,38 +1481,7 @@ pub async fn save_samples(
     let dir = package_dir(&root, &target)?;
     let app_dir = app_dir(&app)?;
     tauri::async_runtime::spawn_blocking(move || {
-        // バイナリの一覧（テストのフォルダを決めるのに使う）。C++ は main だけ（D-204）
-        let bins = match target.language {
-            Language::Rust => {
-                let cargo =
-                    toolchain::find_cargo().ok_or_else(|| "cargo が見つかりません".to_string())?;
-                toolchain::bin_names(&toolchain::metadata_json(&cargo, &dir)?, &dir)?
-            }
-            Language::Cpp => vec![cpp::BIN.to_string()],
-            Language::Python => vec![crate::python::BIN.to_string()],
-        };
-        if !bins.contains(&target.bin) {
-            return Err(format!("バイナリ「{}」が見つかりません", target.bin));
-        }
-        let folder = toolchain::test_dir(&dir, &bins, &target.bin)
-            .dir
-            .unwrap_or_else(|| {
-                if bins.len() == 1 {
-                    dir.join("test")
-                } else {
-                    dir.join("test").join(&target.bin)
-                }
-            });
-        // テストケースのフォルダ（と test/）が、リンクで作業領域の外を指していないことを確かめる
-        for path in [dir.join("test"), folder.clone()] {
-            if path.exists()
-                && !path
-                    .canonicalize()
-                    .is_ok_and(|real| real.starts_with(&root))
-            {
-                return Err("テストケースのフォルダが作業領域の外にあります".to_string());
-            }
-        }
+        let folder = samples_folder(&root, &dir, &target)?;
         let problem = problem::load_problem(&app_dir, &id, false)?;
         let saved = problem::save_samples(&folder, &problem.samples)?;
         let relative = folder
@@ -1440,6 +1495,74 @@ pub async fn save_samples(
     })
     .await
     .map_err(|_| "サンプルを保存できません".to_string())?
+}
+
+// 貼り付けたテストケースを、実行の対象のテストケースのフォルダに sample-N として足す（Phase 25 作業 1。D-243）。
+// フォルダの決め方と確かめは「サンプルを保存」と同じ。足したケースの名前と、パッケージからのフォルダの場所を返す
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AddedCase {
+    name: String,
+    folder: String,
+}
+
+#[tauri::command]
+pub async fn add_test_case(
+    target: Target,
+    input: String,
+    expected: String,
+    workspace: State<'_, Workspace>,
+) -> Result<AddedCase, String> {
+    // cargo metadata を動かすので、信頼していない作業領域では拒否する（D-128）
+    let root = workspace.trusted_root()?;
+    let dir = package_dir(&root, &target)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let folder = samples_folder(&root, &dir, &target)?;
+        let name = problem::add_case(&folder, &input, &expected)?;
+        let relative = folder
+            .strip_prefix(&dir)
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        Ok(AddedCase {
+            name,
+            folder: relative,
+        })
+    })
+    .await
+    .map_err(|_| "テストケースを足せません".to_string())?
+}
+
+// 実行の対象のテストケースのフォルダ（D-090。なければ作る場所）。作業領域の外を指すリンクは拒む
+fn samples_folder(root: &Path, dir: &Path, target: &Target) -> Result<PathBuf, String> {
+    // バイナリの一覧（テストのフォルダを決めるのに使う）。C++ は main だけ（D-204）
+    let bins = match target.language {
+        Language::Rust => {
+            let cargo =
+                toolchain::find_cargo().ok_or_else(|| "cargo が見つかりません".to_string())?;
+            toolchain::bin_names(&toolchain::metadata_json(&cargo, dir)?, dir)?
+        }
+        Language::Cpp => vec![cpp::BIN.to_string()],
+        Language::Python => vec![crate::python::BIN.to_string()],
+    };
+    if !bins.contains(&target.bin) {
+        return Err(format!("バイナリ「{}」が見つかりません", target.bin));
+    }
+    let folder = toolchain::test_dir(dir, &bins, &target.bin)
+        .dir
+        .unwrap_or_else(|| {
+            if bins.len() == 1 {
+                dir.join("test")
+            } else {
+                dir.join("test").join(&target.bin)
+            }
+        });
+    // テストケースのフォルダ（と test/）が、リンクで作業領域の外を指していないことを確かめる
+    for path in [dir.join("test"), folder.clone()] {
+        if path.exists() && !path.canonicalize().is_ok_and(|real| real.starts_with(root)) {
+            return Err("テストケースのフォルダが作業領域の外にあります".to_string());
+        }
+    }
+    Ok(folder)
 }
 
 // 選択欄で選んだ問題のパッケージ（`<コンテスト>/<問題 ID>/`）を、作業領域の直下に作る（Phase 7a。D-151）。
@@ -1594,6 +1717,8 @@ pub struct SettingsView {
     submit: SubmitSettings,
     // 通知の設定（D-239）。画面は設定の画面に使うだけで、知らせるときは Rust 側が読み直す
     notify: NotifySettings,
+    // AtCoder Problems の設定（AtCoder の ID。D-241）。表を出すときは Rust 側が読み直す
+    atcoder_problems: AtcoderProblemsSettings,
     // 問題文の欄の設定（D-196・D-197）
     problem: ProblemSettings,
     // Python の設定（Phase 19 作業 3。D-221）。設定の画面は処理系を選ぶのに使う。動かすときは Rust 側が読み直す
@@ -1610,6 +1735,7 @@ impl SettingsView {
             appearance: loaded.appearance,
             submit: loaded.submit,
             notify: loaded.notify,
+            atcoder_problems: loaded.atcoder_problems,
             problem: loaded.problem,
             python: loaded.python,
             appearance_problems: loaded.appearance_problems,
@@ -1623,6 +1749,7 @@ impl SettingsView {
             appearance: Appearance::default(),
             submit: SubmitSettings::default(),
             notify: NotifySettings::default(),
+            atcoder_problems: AtcoderProblemsSettings::default(),
             problem: ProblemSettings::default(),
             python: PythonSettings::default(),
             appearance_problems: Vec::new(),
@@ -1943,6 +2070,7 @@ pub async fn save_settings(
     appearance: Appearance,
     submit: SubmitSettings,
     notify: NotifySettings,
+    atcoder_problems: AtcoderProblemsSettings,
     problem: ProblemSettings,
     interpreter: Interpreter,
 ) -> Result<SaveSettingsOutcome, String> {
@@ -1979,6 +2107,7 @@ pub async fn save_settings(
         &appearance,
         &submit,
         &notify,
+        &atcoder_problems,
         &problem,
         interpreter,
     )?;

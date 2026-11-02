@@ -315,6 +315,94 @@ function CaseView({
   );
 }
 
+// 「テストケースを足す」（Phase 25 作業 1。D-243）。入力と期待出力を貼り付けて、実行の対象のテストケースのフォルダに
+// sample-N（いちばん大きい番号の次）として足す。期待出力が空なら .in だけ（目視確認のケース）。足しただけでは実行しない
+export function AddCase({
+  blocked,
+  onAdd,
+}: {
+  // 押せない理由。押せるなら null
+  blocked: string | null;
+  // 足せたら true（欄を閉じる）
+  onAdd: (input: string, expected: string) => Promise<boolean>;
+}) {
+  const [open, setOpen] = useState(false);
+  const [input, setInput] = useState("");
+  const [expected, setExpected] = useState("");
+  const [adding, setAdding] = useState(false);
+  if (!open) {
+    return (
+      <div className="test-actions">
+        <button
+          type="button"
+          className="case-action"
+          aria-disabled={blocked !== null}
+          title={blocked ?? "入力と期待出力を貼り付けて、sample-N として足します"}
+          onClick={() => {
+            if (blocked === null) {
+              setOpen(true);
+            }
+          }}
+        >
+          テストケースを足す
+        </button>
+        {blocked && <span className="test-note">{blocked}</span>}
+      </div>
+    );
+  }
+  const addBlocked = blocked ?? (input.trim() === "" ? "入力を貼り付けてください" : null);
+  return (
+    <div className="add-case">
+      <label className="add-case-field">
+        入力
+        <textarea
+          className="add-case-text"
+          value={input}
+          spellCheck={false}
+          onChange={(event) => setInput(event.target.value)}
+        />
+      </label>
+      <label className="add-case-field">
+        期待出力（空なら、比べずに出力を見るだけのケースになります）
+        <textarea
+          className="add-case-text"
+          value={expected}
+          spellCheck={false}
+          onChange={(event) => setExpected(event.target.value)}
+        />
+      </label>
+      <div className="test-actions">
+        <button
+          type="button"
+          className="case-action"
+          aria-disabled={addBlocked !== null || adding}
+          title={addBlocked ?? "テストケースのフォルダに sample-N として足します（上書きはしません）"}
+          onClick={() => {
+            if (addBlocked !== null || adding) {
+              return;
+            }
+            setAdding(true);
+            void onAdd(input, expected).then((added) => {
+              setAdding(false);
+              if (added) {
+                setInput("");
+                setExpected("");
+                setOpen(false);
+              }
+            });
+          }}
+        >
+          {adding ? "足しています…" : "足す"}
+        </button>
+        <button type="button" className="case-action" onClick={() => setOpen(false)}>
+          やめる
+        </button>
+        {addBlocked && <span className="test-note">{addBlocked}</span>}
+      </div>
+    </div>
+  );
+}
+
 function TestResults({
   state,
   blocked,

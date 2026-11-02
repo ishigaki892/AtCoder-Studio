@@ -44,6 +44,12 @@ pub struct Layout {
     // 前の版の state.json にはないので、なければエクスプローラー
     #[serde(default = "default_sidebar_view")]
     pub sidebar_view: String,
+    // 中央の「過去問」のタブ（Phase 24。D-242）：closed・open・active。前の版の state.json にはないので、なければ閉じている
+    #[serde(default)]
+    pub past_problems: String,
+    // 中央の「設定」のタブ（Phase 26。D-246）：closed・open・active。前の版の state.json にはないので、なければ閉じている
+    #[serde(default)]
+    pub settings_tab: String,
 }
 
 fn default_sidebar_view() -> String {
@@ -116,6 +122,8 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
         binding("showExplorer", "e", (true, false, true)),
         binding("showSearch", "f", (true, false, true)),
         binding("showDebug", "d", (true, false, true)),
+        // ⇧⌘C サイドバーの「コンテスト」（2026-11-02、ユーザーの選択。D-245）
+        binding("showContest", "c", (true, false, true)),
     ]
 }
 
@@ -131,7 +139,12 @@ pub struct Appearance {
     pub breadcrumbs: bool,
     pub editor_font_size: u32,
     pub problem_font_size: u32,
+    // 設定の画面の形（Phase 26。D-246）：dialog（窓に重ねる今の形）か editor（中央のタブの VS Code 風）
+    pub settings_ui: String,
 }
+
+// 設定の画面の形の値
+pub const SETTINGS_UIS: [&str; 2] = ["dialog", "editor"];
 
 // settings.json の提出の設定（Phase 9 作業 2。D-162）。書いていない・読めない項目は true（今までどおり確かめる側）
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -189,6 +202,40 @@ fn parse_notify(value: &Value, problems: &mut Vec<String>) -> NotifySettings {
     notify
 }
 
+// settings.json の AtCoder Problems の設定（Phase 24。D-241）。user は AtCoder の ID（空なら AC 状況を出さない）
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AtcoderProblemsSettings {
+    pub user: String,
+}
+
+fn parse_atcoder_problems(value: &Value, problems: &mut Vec<String>) -> AtcoderProblemsSettings {
+    let mut settings = AtcoderProblemsSettings::default();
+    if let Some(section) = section(value, "atcoderProblems", problems) {
+        match section.get("user") {
+            None => {}
+            Some(Value::String(user))
+                if user.trim().is_empty() || crate::atcoder_problems::valid_user(user.trim()) =>
+            {
+                settings.user = user.trim().to_string()
+            }
+            Some(_) => problems.push(
+                "atcoderProblems.user（AtCoder の ID〔英数字と _、16 文字まで〕にしてください）"
+                    .to_string(),
+            ),
+        }
+    }
+    settings
+}
+
+// 過去問の表を出すときに読む（D-241）。読めない・ないときは既定（ID なし）
+pub fn atcoder_problems_settings(dir: &Path) -> AtcoderProblemsSettings {
+    match reread_settings(dir) {
+        Ok(Some(loaded)) => loaded.atcoder_problems,
+        _ => AtcoderProblemsSettings::default(),
+    }
+}
+
 // settings.json の問題文の欄の設定（Phase 15 作業 3。D-196・D-197）
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -203,12 +250,13 @@ pub struct ProblemSettings {
     pub language: Language,
 }
 
-// 見出しの行に出せるボタンの名前（input! を作る・サンプルを保存・再取得・公式ページ・この問題を作る）
-pub const PROBLEM_BUTTONS: [&str; 5] = [
+// 見出しの行に出せるボタンの名前（input! を作る・サンプルを保存・再取得・公式ページ・解説〔Phase 25。D-244〕・この問題を作る）
+pub const PROBLEM_BUTTONS: [&str; 6] = [
     "makeInput",
     "saveSamples",
     "refresh",
     "openPage",
+    "editorial",
     "createProblem",
 ];
 
@@ -372,6 +420,7 @@ impl Default for Appearance {
             breadcrumbs: true,
             editor_font_size: DEFAULT_FONT_SIZE,
             problem_font_size: DEFAULT_FONT_SIZE,
+            settings_ui: "dialog".to_string(),
         }
     }
 }
@@ -411,6 +460,14 @@ pub fn parse_appearance(value: &Value) -> (Appearance, Vec<String>) {
         appearance.error_lens = flag(editor, "errorLens", "editor", &mut problems);
         appearance.breadcrumbs = flag(editor, "breadcrumbs", "editor", &mut problems);
         appearance.editor_font_size = font_size(editor, "editor", &mut problems);
+        match editor.get("settingsUi") {
+            None => {}
+            Some(Value::String(ui)) if SETTINGS_UIS.contains(&ui.as_str()) => {
+                appearance.settings_ui = ui.clone()
+            }
+            Some(_) => problems
+                .push("editor.settingsUi（\"dialog\" か \"editor\" にしてください）".to_string()),
+        }
     }
     if let Some(problem) = section(value, "problem", &mut problems) {
         appearance.problem_font_size = font_size(problem, "problem", &mut problems);
@@ -482,6 +539,13 @@ pub fn ensure_dir(dir: &Path) -> Result<(), String> {
 // W3：同じフォルダの一時ファイルに書き、sync_all で確定させ、名前の変更で置き換える（D-036）。
 // 権限は 0600（D-041）。OS のクラッシュ・電源断に対する完全な耐久性は保証しない
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    // 保存先がシンボリックリンク（dotfiles などで settings.json をリンクにしている）なら、リンクの先に書く。
+    // リンクそのものを置き換えると、リンクの先が古いまま残るため（C-7）。リンクの先がなければ、今までどおりここに書く
+    let resolved = fs::symlink_metadata(path)
+        .is_ok_and(|metadata| metadata.file_type().is_symlink())
+        .then(|| fs::canonicalize(path).ok())
+        .flatten();
+    let path = resolved.as_deref().unwrap_or(path);
     let dir = path
         .parent()
         .ok_or_else(|| "保存先が不正です".to_string())?;
@@ -665,6 +729,7 @@ pub struct LoadedSettings {
     pub appearance: Appearance,
     pub submit: SubmitSettings,
     pub notify: NotifySettings,
+    pub atcoder_problems: AtcoderProblemsSettings,
     pub problem: ProblemSettings,
     pub cpp: CppSettings,
     pub python: PythonSettings,
@@ -689,6 +754,7 @@ fn parse_settings(value: Value) -> Option<LoadedSettings> {
     let (appearance, mut appearance_problems) = parse_appearance(&value);
     let submit = parse_submit(&value, &mut appearance_problems);
     let notify = parse_notify(&value, &mut appearance_problems);
+    let atcoder_problems = parse_atcoder_problems(&value, &mut appearance_problems);
     let problem = parse_problem_settings(&value, &mut appearance_problems);
     let cpp = parse_cpp_settings(&value, &mut appearance_problems);
     let python = parse_python_settings(&value, &mut appearance_problems);
@@ -698,6 +764,7 @@ fn parse_settings(value: Value) -> Option<LoadedSettings> {
         appearance,
         submit,
         notify,
+        atcoder_problems,
         problem,
         cpp,
         python,
@@ -733,14 +800,16 @@ pub fn settings_stamp(dir: &Path) -> Option<(SystemTime, u64)> {
     Some((metadata.modified().ok()?, metadata.len()))
 }
 
-// 設定の画面の保存（作業 6b。D-159）。今のファイルの keyBindings・colors と、editor・problem・submit・notify・python の
+// 設定の画面の保存（作業 6b。D-159）。今のファイルの keyBindings・colors と、editor・problem・submit・notify・atcoderProblems・python の
 // 設定の画面で扱う項目だけを入れ替え、ほかの項目は残す（python は interpreter だけ。処理系のパスは残す。Phase 19 作業 3。D-221）。読めないファイル（JSON の誤り・版の違い）には書かない
+#[allow(clippy::too_many_arguments)]
 pub fn write_settings(
     dir: &Path,
     key_bindings: &[KeyBinding],
     appearance: &Appearance,
     submit: &SubmitSettings,
     notify: &NotifySettings,
+    atcoder_problems: &AtcoderProblemsSettings,
     problem_settings: &ProblemSettings,
     interpreter: Interpreter,
 ) -> Result<(), String> {
@@ -758,6 +827,7 @@ pub fn write_settings(
         "errorLens": appearance.error_lens,
         "breadcrumbs": appearance.breadcrumbs,
         "fontSize": appearance.editor_font_size,
+        "settingsUi": appearance.settings_ui,
     });
     let problem = serde_json::json!({
         "fontSize": appearance.problem_font_size,
@@ -774,6 +844,10 @@ pub fn write_settings(
     });
     let (_, mut problems) = parse_appearance(&checked);
     parse_problem_settings(&checked, &mut problems);
+    parse_atcoder_problems(
+        &serde_json::json!({ "atcoderProblems": { "user": atcoder_problems.user } }),
+        &mut problems,
+    );
     if !problems.is_empty() || key_bindings.iter().any(|binding| binding.key.len() > 32) {
         return Err(format!(
             "保存できない値があるので、保存しません：{}",
@@ -812,6 +886,11 @@ pub fn write_settings(
     );
     merge_section(
         object,
+        "atcoderProblems",
+        serde_json::json!({ "user": atcoder_problems.user.trim() }),
+    );
+    merge_section(
+        object,
         "python",
         serde_json::json!({ "interpreter": interpreter }),
     );
@@ -840,7 +919,7 @@ pub fn write_default_settings(dir: &Path) -> Result<(), String> {
         "version": VERSION,
         "keyBindings": default_key_bindings(),
         "colors": {},
-        "editor": { "indentRainbow": true, "errorLens": true, "breadcrumbs": true, "fontSize": DEFAULT_FONT_SIZE },
+        "editor": { "indentRainbow": true, "errorLens": true, "breadcrumbs": true, "fontSize": DEFAULT_FONT_SIZE, "settingsUi": "dialog" },
         "problem": {
             "fontSize": DEFAULT_FONT_SIZE,
             "buttons": ProblemSettings::default().buttons,
@@ -850,6 +929,7 @@ pub fn write_default_settings(dir: &Path) -> Result<(), String> {
         },
         "submit": { "testBeforeSubmit": true, "confirmDialog": true },
         "notify": { "judge": false, "contestStart": false },
+        "atcoderProblems": { "user": "" },
         "cpp": { "compiler": "" },
         "python": { "interpreter": "cpython", "cpython": "", "pypy": "" },
     });
@@ -915,6 +995,8 @@ mod tests {
                 bottom_right_ratio: 0.375,
                 bottom_right_visible: true,
                 sidebar_view: "debug".to_string(),
+                past_problems: "active".to_string(),
+                settings_tab: "open".to_string(),
             },
             workspace: Some(PathBuf::from("/tmp/ws")),
             tabs: vec!["src/main.rs".to_string()],
@@ -986,6 +1068,43 @@ mod tests {
             .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
             .collect();
         assert_eq!(names, vec!["same.json".to_string()]);
+    }
+
+    // 保存先がシンボリックリンクなら、リンクを残したまま、リンクの先を書き換える（C-7）
+    #[test]
+    fn writes_through_symbolic_links() {
+        let dir = TempDir::new("symlink");
+        let dotfiles = dir.0.join("dotfiles");
+        ensure_dir(&dotfiles).unwrap();
+        let real = dotfiles.join("settings.json");
+        fs::write(&real, "old").unwrap();
+        let link = dir.0.join("settings.json");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        write_atomic(&link, b"new").unwrap();
+        assert!(
+            fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(fs::read_to_string(&real).unwrap(), "new");
+        // 一時ファイルは、リンクの先のフォルダにも残らない
+        let names: Vec<_> = fs::read_dir(&dotfiles)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["settings.json".to_string()]);
+        // リンクの先がなければ、今までどおりリンクの場所に書く
+        let dangling = dir.0.join("state.json");
+        std::os::unix::fs::symlink(dir.0.join("missing.json"), &dangling).unwrap();
+        write_atomic(&dangling, b"x").unwrap();
+        assert!(
+            !fs::symlink_metadata(&dangling)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(fs::read_to_string(&dangling).unwrap(), "x");
     }
 
     #[test]
@@ -1260,6 +1379,7 @@ mod tests {
             &appearance,
             &SubmitSettings::default(),
             &NotifySettings::default(),
+            &AtcoderProblemsSettings::default(),
             &ProblemSettings::default(),
             Interpreter::Cpython,
         )
@@ -1295,6 +1415,7 @@ mod tests {
                 &bad,
                 &SubmitSettings::default(),
                 &NotifySettings::default(),
+                &AtcoderProblemsSettings::default(),
                 &ProblemSettings::default(),
                 Interpreter::Cpython
             )
@@ -1310,6 +1431,7 @@ mod tests {
                 &appearance,
                 &SubmitSettings::default(),
                 &NotifySettings::default(),
+                &AtcoderProblemsSettings::default(),
                 &ProblemSettings::default(),
                 Interpreter::Cpython
             )
@@ -1324,6 +1446,7 @@ mod tests {
             &appearance,
             &SubmitSettings::default(),
             &NotifySettings::default(),
+            &AtcoderProblemsSettings::default(),
             &ProblemSettings::default(),
             Interpreter::Cpython,
         )
@@ -1374,6 +1497,7 @@ mod tests {
             &Appearance::default(),
             &submit,
             &notify,
+            &AtcoderProblemsSettings::default(),
             &ProblemSettings::default(),
             Interpreter::Cpython,
         )
@@ -1384,6 +1508,41 @@ mod tests {
         write_default_settings(&dir.0).unwrap();
         assert_eq!(submit_settings(&dir.0), SubmitSettings::default());
         assert_eq!(notify_settings(&dir.0), NotifySettings::default());
+    }
+
+    #[test]
+    fn reads_atcoder_problems_settings() {
+        let read = |text: &str| parse_settings(serde_json::from_str(text).unwrap()).unwrap();
+        assert_eq!(read(r#"{"version": 1}"#).atcoder_problems.user, "");
+        assert_eq!(
+            read(r#"{"version": 1, "atcoderProblems": {"user": " chokudai "}}"#)
+                .atcoder_problems
+                .user,
+            "chokudai"
+        );
+        let loaded = read(r#"{"version": 1, "atcoderProblems": {"user": "a/b"}}"#);
+        assert_eq!(loaded.atcoder_problems.user, "");
+        assert_eq!(loaded.appearance_problems.len(), 1);
+        // 書いて読み直す。正しくない ID は書かない
+        let dir = TempDir::new("atcoder-problems");
+        let write = |user: &str| {
+            write_settings(
+                &dir.0,
+                &[],
+                &Appearance::default(),
+                &SubmitSettings::default(),
+                &NotifySettings::default(),
+                &AtcoderProblemsSettings {
+                    user: user.to_string(),
+                },
+                &ProblemSettings::default(),
+                Interpreter::Cpython,
+            )
+        };
+        write("user_1").unwrap();
+        assert_eq!(atcoder_problems_settings(&dir.0).user, "user_1");
+        assert!(write("../x").is_err());
+        assert_eq!(atcoder_problems_settings(&dir.0).user, "user_1");
     }
 
     #[test]
@@ -1449,6 +1608,7 @@ mod tests {
                 &Appearance::default(),
                 &SubmitSettings::default(),
                 &NotifySettings::default(),
+                &AtcoderProblemsSettings::default(),
                 &ProblemSettings::default(),
                 interpreter,
             )
@@ -1559,6 +1719,7 @@ mod tests {
             &appearance,
             &SubmitSettings::default(),
             &NotifySettings::default(),
+            &AtcoderProblemsSettings::default(),
             &problem,
             Interpreter::Cpython,
         )
@@ -1581,6 +1742,7 @@ mod tests {
                 &appearance,
                 &SubmitSettings::default(),
                 &NotifySettings::default(),
+                &AtcoderProblemsSettings::default(),
                 &bad,
                 Interpreter::Cpython
             )
@@ -1633,5 +1795,43 @@ mod tests {
             lock
         });
         assert!(again.is_some());
+    }
+
+    #[test]
+    fn reads_and_writes_the_settings_ui() {
+        let read = |text: &str| parse_appearance(&serde_json::from_str(text).unwrap());
+        assert_eq!(read(r#"{}"#).0.settings_ui, "dialog");
+        assert_eq!(
+            read(r#"{"editor": {"settingsUi": "editor"}}"#)
+                .0
+                .settings_ui,
+            "editor"
+        );
+        let (appearance, problems) = read(r#"{"editor": {"settingsUi": "tab"}}"#);
+        assert_eq!(appearance.settings_ui, "dialog");
+        assert_eq!(problems.len(), 1);
+        // 書いて読み直す。知らない値は書かない
+        let dir = TempDir::new("settings-ui");
+        let write = |ui: &str| {
+            write_settings(
+                &dir.0,
+                &[],
+                &Appearance {
+                    settings_ui: ui.to_string(),
+                    ..Appearance::default()
+                },
+                &SubmitSettings::default(),
+                &NotifySettings::default(),
+                &AtcoderProblemsSettings::default(),
+                &ProblemSettings::default(),
+                Interpreter::Cpython,
+            )
+        };
+        write("editor").unwrap();
+        let Ok(Loaded::Ok(loaded)) = load_settings(&dir.0) else {
+            panic!("読めるはず");
+        };
+        assert_eq!(loaded.appearance.settings_ui, "editor");
+        assert!(write("tab").is_err());
     }
 }

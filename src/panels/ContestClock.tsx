@@ -3,7 +3,7 @@
 // 開催期間は Rust 側がコンテストのトップページから読む（コンテストが変わったときだけ頼む）。
 // 数えるのはこの部品の中で 1 秒ごと（App 全体は描き直さない）。時計は Mac の時計を使う。
 // 終わったあと・問題が決まっていないとき・読めないときは何も出さない
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { contestPeriod, watchContestStart, type ContestPeriod } from "../ipc/submit";
 
 // 開催中で、残りがこれを切ったら注意の色にする（5 分）
@@ -39,8 +39,10 @@ function formatPeriod(period: ContestPeriod): string {
 }
 
 function ContestClock({ contest }: { contest: string | null }) {
-  // 読んだ開催期間（どのコンテストのものか、と合わせて覚える）
-  const [period, setPeriod] = useState<(ContestPeriod & { contest: string }) | null>(null);
+  // 読んだ開催期間（どのコンテストのものか、と合わせて覚える）。readAt は読んだときの時刻（秒）
+  const [period, setPeriod] = useState<(ContestPeriod & { contest: string; readAt: number }) | null>(null);
+  // 終了時刻を過ぎたあとに読み直した「コンテスト@終了時刻」（同じ終了時刻では 1 回だけ。C-3）
+  const recheckedRef = useRef<string | null>(null);
   const [now, setNow] = useState(() => Date.now() / 1000);
 
   // コンテストが変わったときだけ頼む（同じコンテストの別の問題では頼まない）
@@ -51,8 +53,9 @@ function ContestClock({ contest }: { contest: string | null }) {
       .then((read) => {
         if (cancelled) return;
         // 数えるのを止めていた間に古くなった「今」を、ここで合わせる（終わったコンテストを一瞬出さない）
-        setNow(Date.now() / 1000);
-        setPeriod({ ...read, contest });
+        const readAt = Date.now() / 1000;
+        setNow(readAt);
+        setPeriod({ ...read, contest, readAt });
       })
       .catch(() => {
         // 読めないときは何も出さない（ほかの機能の邪魔をしない）
@@ -64,6 +67,31 @@ function ContestClock({ contest }: { contest: string | null }) {
 
   const shown = period !== null && period.contest === contest ? period : null;
   const ended = shown === null || now >= shown.end;
+
+  // 数えている間に終了時刻を過ぎたら、1 回だけ読み直す（延長に追いつく。C-3）。延びていれば数え続ける。
+  // 読んだときにもう終わっていたコンテスト（過去のコンテスト）は読み直さない
+  const passedEnd = shown !== null && now >= shown.end && shown.readAt < shown.end;
+  useEffect(() => {
+    if (!passedEnd || shown === null) return;
+    const key = `${shown.contest}@${shown.end}`;
+    if (recheckedRef.current === key) return;
+    recheckedRef.current = key;
+    const { contest: target, end } = shown;
+    let cancelled = false;
+    contestPeriod(target, true)
+      .then((read) => {
+        if (cancelled || read.end <= end) return;
+        const readAt = Date.now() / 1000;
+        setNow(readAt);
+        setPeriod({ ...read, contest: target, readAt });
+      })
+      .catch(() => {
+        // 読めなければ、終わったものとして何も出さない
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [passedEnd, shown?.contest, shown?.end]);
 
   // 出しているコンテストを Rust 側に伝える。開始の通知は、Rust 側が開始の時刻まで待って出す（D-239。窓が後ろにある
   // 間は画面のタイマーが間引かれることがあるため、画面では数えない）。始まっても伝え直さない（伝え直すと待つのをやめる）

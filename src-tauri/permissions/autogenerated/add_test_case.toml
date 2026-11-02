@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-add-test-case"
+description = "Enables the add_test_case command without any pre-configured scope."
+commands.allow = ["add_test_case"]
+
+[[permission]]
+identifier = "deny-add-test-case"
+description = "Denies the add_test_case command without any pre-configured scope."
+commands.deny = ["add_test_case"]

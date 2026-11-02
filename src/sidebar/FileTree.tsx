@@ -9,6 +9,7 @@ import {
   type ReactNode,
 } from "react";
 import FileIcon from "./FileIcon";
+import { isImeKey } from "../keybindings";
 import {
   createNewFile,
   createNewFolder,
@@ -89,6 +90,10 @@ function NameInput({
   function handleKeyDown(event: KeyboardEvent<HTMLInputElement>) {
     // ⌘B などのアプリのキー割り当てを、入力中は働かせない
     event.stopPropagation();
+    // 日本語入力の変換を確定・取り消す Enter・Esc は、名前の確定・取り消しに使わない（C-6）
+    if (isImeKey(event.nativeEvent)) {
+      return;
+    }
     if (event.key === "Enter" && value.trim() !== "") {
       onSubmit(value.trim());
     } else if (event.key === "Escape") {

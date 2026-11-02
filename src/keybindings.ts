@@ -23,7 +23,9 @@ export type Command =
   // サイドバーの中身（Phase 12 作業 1。D-182）
   | "showExplorer"
   | "showSearch"
-  | "showDebug";
+  | "showDebug"
+  // サイドバーの「コンテスト」（2026-11-02、ユーザーの依頼。D-245）
+  | "showContest";
 
 export const COMMANDS: Command[] = [
   "toggleSidebar",
@@ -46,6 +48,7 @@ export const COMMANDS: Command[] = [
   "showExplorer",
   "showSearch",
   "showDebug",
+  "showContest",
 ];
 
 // コマンドの名前（知らせ・設定の画面で使う。docs/usage.md の「キーの割り当て」の表と同じ）
@@ -70,6 +73,7 @@ export const COMMAND_LABELS: Record<Command, string> = {
   showExplorer: "エクスプローラー",
   showSearch: "検索",
   showDebug: "実行とデバッグ",
+  showContest: "コンテスト",
 };
 
 export type KeyBinding = {
@@ -114,6 +118,8 @@ export const DEFAULT_KEY_BINDINGS: KeyBinding[] = [
   { command: "showExplorer", key: "e", meta: true, ctrl: false, alt: false, shift: true },
   { command: "showSearch", key: "f", meta: true, ctrl: false, alt: false, shift: true },
   { command: "showDebug", key: "d", meta: true, ctrl: false, alt: false, shift: true },
+  // ⇧⌘C：サイドバーの「コンテスト」（2026-11-02、ユーザーの選択。D-245）
+  { command: "showContest", key: "c", meta: true, ctrl: false, alt: false, shift: true },
 ];
 
 let keyBindings: KeyBinding[] = DEFAULT_KEY_BINDINGS;
@@ -151,6 +157,18 @@ export function keyLabel(binding: Omit<KeyBinding, "command">): string {
 // 今の割り当て（設定の画面で使う。作業 6b。D-159）
 export function getKeyBindings(): KeyBinding[] {
   return keyBindings;
+}
+
+// コマンドの今のキーの見せ方（例：⇧⌘R）。割り当てがなければ null。ボタンのツールチップに出す（D-245）
+export function shortcutFor(command: Command): string | null {
+  const binding = keyBindings.find((item) => item.command === command && item.key !== "");
+  return binding ? keyLabel(binding) : null;
+}
+
+// 「実行（⌘R）」の形。割り当てがなければ名前だけ
+export function withShortcut(label: string, command: Command): string {
+  const key = shortcutFor(command);
+  return key ? `${label}（${key}）` : label;
 }
 
 // 押したキーから割り当てを作る（設定の画面の「変更」。D-159）。修飾キーだけのときは null。
@@ -211,6 +229,12 @@ function physicalKey(code: string): string | undefined {
     return letter[1].toLowerCase();
   }
   return /^Digit([0-9])$/.exec(code)?.[1];
+}
+
+// 日本語入力などの変換中のキーか（C-5・C-6）。WebKit は、変換を確定する Enter を、変換が終わったあとのキー
+// （isComposing が false）として送ることがあるので、keyCode の 229（変換のキー）も見る
+export function isImeKey(event: KeyboardEvent): boolean {
+  return event.isComposing || event.keyCode === 229;
 }
 
 export function findCommand(event: KeyboardEvent): Command | undefined {

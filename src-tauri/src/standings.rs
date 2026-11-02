@@ -142,8 +142,14 @@ pub enum Kind {
     Heuristic,
 }
 
-pub fn kind_of(contest: &str, range: Option<RatedRange>) -> Kind {
-    if contest.starts_with("ahc") {
+// ヒューリスティックかは、ID が `ahc` で始まるか、コンテストの名前（トップページの題名）に「Heuristic」「ヒューリスティック」が
+// 入っているかで決める（企業のコンテストの「…（AtCoder Heuristic Contest 031）」など、ID が `ahc` で始まらないもの。C-4）
+pub fn kind_of(contest: &str, title: &str, range: Option<RatedRange>) -> Kind {
+    let title = title.to_lowercase();
+    if contest.starts_with("ahc")
+        || title.contains("heuristic")
+        || title.contains("ヒューリスティック")
+    {
         return Kind::Heuristic;
     }
     match range {
@@ -407,6 +413,18 @@ fn infos() -> &'static Mutex<HashMap<String, ContestInfo>> {
     INFOS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+// 覚えている種類と開催期間を忘れる（次の contest_info で読み直す。延長に追いつくため。C-3）
+pub fn forget_contest_info(contest: &str) {
+    if let Ok(mut map) = infos().lock() {
+        map.remove(contest);
+    }
+}
+
+// トップページの題名（`<title>`。例：「AtCoder Heuristic Contest 050 - AtCoder」）
+fn contest_title(html: &str) -> String {
+    Document::from(html).select("title").text().to_string()
+}
+
 // トップページを読んで、種類と開催期間を決める。覚えてあれば読まない
 pub fn contest_info(
     contest: &str,
@@ -425,7 +443,7 @@ pub fn contest_info(
     let range = parse_rated_range(&html)
         .ok_or_else(|| "コンテストのページから Rated の範囲を読めません".to_string())?;
     let info = ContestInfo {
-        kind: kind_of(contest, range),
+        kind: kind_of(contest, &contest_title(&html), range),
         start: period.start,
         end: period.end,
     };
@@ -515,8 +533,34 @@ mod tests {
         );
         assert_eq!(parse_rated_range("<span>Rated対象: - </span>"), Some(None));
         assert_eq!(parse_rated_range("<span>ほかの文字</span>"), None);
-        assert_eq!(kind_of("ahc050", Some(ABC)), Kind::Heuristic);
-        assert_eq!(kind_of("abc481", None), Kind::Unrated);
+        assert_eq!(kind_of("ahc050", "", Some(ABC)), Kind::Heuristic);
+        assert_eq!(kind_of("abc481", "", None), Kind::Unrated);
+        assert_eq!(
+            kind_of(
+                "abc481",
+                "AtCoder Beginner Contest 481 - AtCoder",
+                Some(ABC)
+            ),
+            Kind::Rated(ABC)
+        );
+        // ID が ahc で始まらなくても、名前でヒューリスティックと分かれば出さない（C-4）
+        for title in [
+            "トヨタ自動車プログラミングコンテスト2024#2（AtCoder Heuristic Contest 031） - AtCoder",
+            "Example Heuristic Contest - AtCoder",
+            "サンプル ヒューリスティックコンテスト - AtCoder",
+        ] {
+            assert_eq!(
+                kind_of("toyota2024", title, Some(ABC)),
+                Kind::Heuristic,
+                "{title}"
+            );
+        }
+        assert_eq!(
+            contest_title(
+                "<html><head><title>AtCoder Heuristic Contest 050 - AtCoder</title></head></html>"
+            ),
+            "AtCoder Heuristic Contest 050 - AtCoder"
+        );
         assert_eq!(performance_cap(ABC), Some(2400.0));
         assert_eq!(
             performance_cap(RatedRange {

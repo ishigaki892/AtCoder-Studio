@@ -13,6 +13,10 @@ export type Layout = {
   bottomRightVisible: boolean;
   // サイドバーの中身（Phase 12 作業 1。D-182）。知らない値はエクスプローラーとして扱う（App.tsx）
   sidebarView: string;
+  // 中央の「過去問」のタブ（Phase 24。D-242）：closed・open・active。前の版の state.json にはない（空なら閉じている）
+  pastProblems: string;
+  // 中央の「設定」のタブ（Phase 26。D-246）：closed・open・active。前の版の state.json にはない
+  settingsTab: string;
 };
 
 export type LoadedKeyBinding = {
@@ -34,7 +38,17 @@ export type Appearance = {
   breadcrumbs: boolean;
   editorFontSize: number;
   problemFontSize: number;
+  // 設定の画面の形（Phase 26。D-246）：dialog（窓に重ねる今の形）・editor（中央のタブの VS Code 風）
+  settingsUi: SettingsUi;
 };
+
+export type SettingsUi = "dialog" | "editor";
+
+export const SETTINGS_UIS: { value: SettingsUi; label: string }[] = [
+  // 画面に出す名前は「設定1」「設定2」（2026-11-02、ユーザーの依頼）
+  { value: "dialog", label: "設定1（窓に重ねる）" },
+  { value: "editor", label: "設定2（VS Code 風。中央のタブ）" },
+];
 
 // settings.json の提出の設定（Phase 9 作業 2。D-162）。提出のときは、Rust 側が settings.json から読み直す
 export type SubmitSettings = {
@@ -53,6 +67,11 @@ export type NotifySettings = {
 };
 
 export const DEFAULT_NOTIFY_SETTINGS: NotifySettings = { judge: false, contestStart: false };
+
+// settings.json の AtCoder Problems の設定（Phase 24。D-241）。user は AtCoder の ID（空なら AC 状況を出さない）
+export type AtcoderProblemsSettings = { user: string };
+
+export const DEFAULT_ATCODER_PROBLEMS_SETTINGS: AtcoderProblemsSettings = { user: "" };
 
 // settings.json の問題文の欄の設定（Phase 15 作業 3。D-196・D-197）
 export type ProblemSettings = {
@@ -79,6 +98,8 @@ export const PROBLEM_BUTTONS = [
   { name: "saveSamples", label: "サンプルを保存" },
   { name: "refresh", label: "再取得" },
   { name: "openPage", label: "公式ページ" },
+  // 解説の一覧を既定のブラウザで開く（Phase 25 作業 2。D-244）
+  { name: "editorial", label: "解説" },
   { name: "createProblem", label: "この問題を作る" },
 ] as const;
 
@@ -112,6 +133,7 @@ export type SettingsView = {
   appearance: Appearance;
   submit: SubmitSettings;
   notify: NotifySettings;
+  atcoderProblems: AtcoderProblemsSettings;
   problem: ProblemSettings;
   python: PythonSettings;
   appearanceProblems: string[];
@@ -150,10 +172,19 @@ export function saveSettings(
   appearance: Appearance,
   submit: SubmitSettings,
   notify: NotifySettings,
+  atcoderProblems: AtcoderProblemsSettings,
   problem: ProblemSettings,
   interpreter: Interpreter,
 ): Promise<SaveSettingsOutcome> {
-  return invoke<SaveSettingsOutcome>("save_settings", { keyBindings, appearance, submit, notify, problem, interpreter });
+  return invoke<SaveSettingsOutcome>("save_settings", {
+    keyBindings,
+    appearance,
+    submit,
+    notify,
+    atcoderProblems,
+    problem,
+    interpreter,
+  });
 }
 
 // settings.json を既定のテキストエディタで開く（D-159）

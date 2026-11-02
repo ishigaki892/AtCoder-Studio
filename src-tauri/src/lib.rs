@@ -1,3 +1,4 @@
+mod atcoder_problems;
 mod commands;
 mod compare;
 mod cpp;
@@ -167,8 +168,12 @@ pub fn run() {
             commands::clear_history,
             commands::load_problem,
             commands::load_problem_images,
+            commands::problem_difficulties,
+            commands::past_problems,
             commands::load_task_list,
             commands::open_problem_page,
+            commands::open_editorial_page,
+            commands::add_test_case,
             commands::atcoder_login,
             commands::atcoder_session,
             commands::atcoder_logout,

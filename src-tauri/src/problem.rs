@@ -456,6 +456,81 @@ pub fn save_samples(folder: &Path, samples: &[Sample]) -> Result<SavedSamples, S
     Ok(saved)
 }
 
+// 貼り付けたテストケースを足す（Phase 25 作業 1。D-243）。1 つの欄の上限
+pub const MAX_CASE_BYTES: usize = 4 * 1024 * 1024;
+
+// 改行を LF にそろえ、空でなければ最後に改行を 1 つ付ける（AtCoder のサンプルと同じ形）
+pub fn normalize_case_text(text: &str) -> String {
+    let mut text = text.replace("\r\n", "\n").replace('\r', "\n");
+    if !text.is_empty() && !text.ends_with('\n') {
+        text.push('\n');
+    }
+    text
+}
+
+// フォルダの sample-N（.in か .out）のいちばん大きい N の次。なければ 1。random-N などは数えない
+pub fn next_sample_number(folder: &Path) -> usize {
+    std::fs::read_dir(folder)
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter_map(|entry| {
+                    let name = entry.file_name().to_string_lossy().into_owned();
+                    let stem = name
+                        .strip_suffix(".in")
+                        .or_else(|| name.strip_suffix(".out"))?;
+                    let digits = stem.strip_prefix("sample-")?;
+                    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+                        return None;
+                    }
+                    digits.parse::<usize>().ok()
+                })
+                .max()
+                .unwrap_or(0)
+        })
+        .unwrap_or(0)
+        + 1
+}
+
+// 入力と期待出力を sample-N.in・sample-N.out として足す（上書きしない）。期待出力が空なら .out は作らない
+// （目視確認のケースになる）。足したケースの名前（sample-N）を返す
+pub fn add_case(folder: &Path, input: &str, expected: &str) -> Result<String, String> {
+    if input.len() > MAX_CASE_BYTES || expected.len() > MAX_CASE_BYTES {
+        return Err("4 MB より大きいので足せません".to_string());
+    }
+    let input = normalize_case_text(input);
+    let expected = normalize_case_text(expected);
+    if input.trim().is_empty() {
+        return Err("入力が空です".to_string());
+    }
+    std::fs::create_dir_all(folder)
+        .map_err(|_| "テストケースのフォルダを作れません".to_string())?;
+    let name = format!("sample-{}", next_sample_number(folder));
+    let write = |extension: &str, content: &str| -> Result<(), String> {
+        let file_name = format!("{name}.{extension}");
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(folder.join(&file_name))
+            .map_err(|_| format!("{file_name} を作れません（すでにあるかもしれません）"))?;
+        std::io::Write::write_all(&mut file, content.as_bytes())
+            .map_err(|_| format!("{file_name} を書けません"))
+    };
+    write("in", &input)?;
+    if !expected.is_empty() {
+        write("out", &expected)?;
+    }
+    Ok(name)
+}
+
+// 問題の解説の一覧のページ（Phase 25 作業 2。D-244）
+pub fn editorial_url(id: &ProblemId) -> String {
+    format!(
+        "https://atcoder.jp/contests/{}/tasks/{}/editorial?lang=ja",
+        id.contest, id.task
+    )
+}
+
 // コンテストの問題の一覧の 1 行（選択欄に出す。D-117）
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TaskEntry {
@@ -558,8 +633,17 @@ pub fn load_task_list(
 // 公式の問題ページを、macOS の open コマンドで既定のブラウザで開く（D-110 の代替手段）。
 // URL は ID を確かめてから IDE が組み立てたもの
 pub fn open_in_browser(id: &ProblemId) -> Result<(), String> {
+    open_url(&id.url())
+}
+
+// 解説の一覧を既定のブラウザで開く（D-244。IDE は読まない）
+pub fn open_editorial(id: &ProblemId) -> Result<(), String> {
+    open_url(&editorial_url(id))
+}
+
+fn open_url(url: &str) -> Result<(), String> {
     let status = Command::new("/usr/bin/open")
-        .arg(id.url())
+        .arg(url)
         .status()
         .map_err(|error| format!("ブラウザを開けません：{error}"))?;
     if status.success() {
@@ -925,5 +1009,49 @@ mod tests {
         let started = Instant::now();
         wait_for_interval();
         assert!(started.elapsed() >= Duration::from_millis(900));
+    }
+
+    #[test]
+    fn adds_pasted_cases_after_the_largest_sample() {
+        let folder =
+            std::env::temp_dir().join(format!("atcoder-studio-add-case-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&folder);
+        // フォルダがなければ作って sample-1
+        assert_eq!(add_case(&folder, "1 2", "3").unwrap(), "sample-1");
+        assert_eq!(
+            std::fs::read_to_string(folder.join("sample-1.in")).unwrap(),
+            "1 2\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(folder.join("sample-1.out")).unwrap(),
+            "3\n"
+        );
+        // 間が空いていても、いちばん大きい番号の次。random-N・名前の違うものは数えない
+        std::fs::write(folder.join("sample-7.out"), "x\n").unwrap();
+        std::fs::write(folder.join("random-20.in"), "x\n").unwrap();
+        std::fs::write(folder.join("sample-x.in"), "x\n").unwrap();
+        std::fs::write(folder.join("sample-+9.in"), "x\n").unwrap();
+        assert_eq!(next_sample_number(&folder), 8);
+        // 改行は LF にそろえ、最後の改行は 1 つ（もとからあれば足さない）。期待出力が空なら .out は作らない
+        assert_eq!(add_case(&folder, "a\r\nb\rc\r\n", "").unwrap(), "sample-8");
+        assert_eq!(
+            std::fs::read_to_string(folder.join("sample-8.in")).unwrap(),
+            "a\nb\nc\n"
+        );
+        assert!(!folder.join("sample-8.out").exists());
+        // 入力が空・大きすぎるものは足さない
+        assert!(add_case(&folder, " \n", "1").is_err());
+        assert!(add_case(&folder, &"1".repeat(MAX_CASE_BYTES + 1), "").is_err());
+        assert_eq!(next_sample_number(&folder), 9);
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    #[test]
+    fn writes_the_editorial_url() {
+        let id = ProblemId::new("abc481", "abc481_d").unwrap();
+        assert_eq!(
+            editorial_url(&id),
+            "https://atcoder.jp/contests/abc481/tasks/abc481_d/editorial?lang=ja"
+        );
     }
 }

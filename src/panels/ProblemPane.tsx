@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState } from "react";
+import { difficultyHint, difficultyText, problemDifficulties, type DifficultyView } from "../ipc/atcoderProblems";
+import { ratingClass } from "../rating";
 import katex from "katex";
 import renderMathInElement from "katex/contrib/auto-render";
 import "katex/dist/katex.min.css";
@@ -8,6 +10,7 @@ import {
   loadProblem,
   loadProblemImages,
   makeInput,
+  openEditorialPage,
   openProblemPage,
   type GeneratedInput,
   saveSamples,
@@ -137,7 +140,7 @@ function describeSaved(saved: SavedSamples): string {
   }
   if (saved.leftover.length > 0) {
     parts.push(
-      `問題のサンプルより多い ${saved.leftover.join("、")} が残っています（消していません。要らなければ消してください）`,
+      `問題のサンプルより大きい番号の ${saved.leftover.join("、")} があります（自分で足したケースなら、そのままで構いません）`,
     );
   }
   return parts.join("。");
@@ -265,6 +268,31 @@ function ProblemPane({
       window.removeEventListener("keydown", onKeyDown);
     };
   }, [moreOpen]);
+
+  // 問題の AtCoder Problems の diff（Phase 24。D-241）。問題が変わったときだけ聞く。ないとき・読めないときは出さない
+  const [difficulty, setDifficulty] = useState<{ key: string; view: DifficultyView } | null>(null);
+  useEffect(() => {
+    if (!id || key === null) {
+      return;
+    }
+    const shownKey = key;
+    let cancelled = false;
+    problemDifficulties([id.task])
+      .then((found) => {
+        const view = found[id.task];
+        if (!cancelled) {
+          setDifficulty(view ? { key: shownKey, view } : null);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setDifficulty(null);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [key]);
 
   // 問題が変わったら読み込む。保存してあれば取得しない（D-111）
   useEffect(() => {
@@ -453,6 +481,9 @@ function ProblemPane({
       case "openPage":
         openPage(problemId);
         break;
+      case "editorial":
+        openEditorialPage(problemId).catch(() => {});
+        break;
       case "createProblem":
         void create(problemId);
         break;
@@ -569,6 +600,17 @@ function ProblemPane({
             <div className="problem-limits">
               実行時間制限 <span className="problem-limit-value">{state.problem.timeLimit}</span> /
               メモリ制限 <span className="problem-limit-value">{state.problem.memoryLimit}</span>
+              {difficulty && difficulty.key === key && (
+                <>
+                  {" / "}
+                  <span
+                    className={`problem-diff ${ratingClass(difficulty.view.value)}`}
+                    title={difficultyHint(difficulty.view)}
+                  >
+                    {difficultyText(difficulty.view)}
+                  </span>
+                </>
+              )}
             </div>
           </div>
           {notice && <div className="problem-notice">{notice}</div>}

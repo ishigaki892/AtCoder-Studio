@@ -6,92 +6,56 @@
 // - 色・表示は、変えるとすぐに画面に出す（試し見）。「キャンセル」・Esc で、開く前の見た目に戻す
 // - キーは「変更」を押してから押したキーを割り当てる。ぶつかるキー・修飾キーのないキー・決まったキーは断る
 // - 画面を開いている間に settings.json が外で変わったら（App が読み直したら resetSeq が進む）、中身を読み直して知らせる
-import { useEffect, useMemo, useState } from "react";
-import { applyAppearance, COLOR_GROUPS, defaultColor, joinColor, splitColor } from "../appearance";
+import { useEffect, useState } from "react";
+import { applyAppearance, defaultColor, splitColor } from "../appearance";
 import {
   INTERPRETERS,
   LANGUAGES,
   PROBLEM_BUTTONS,
   type Appearance,
   type Interpreter,
+  type AtcoderProblemsSettings,
   type LoadedKeyBinding,
   type NotifySettings,
   type ProblemSettings,
   type PythonSettings,
+  type SettingsUi,
   type SubmitSettings,
+  SETTINGS_UIS,
 } from "../ipc/state";
-import { snippetsFile, type LoadedSnippets } from "../ipc/snippets";
+import type { LoadedSnippets } from "../ipc/snippets";
 import type { Language } from "../ipc/workspace";
-import { openTemplatesFolder, templateFiles, type TemplateFiles } from "../ipc/scaffold";
 import { saveSettings } from "../ipc/state";
-import {
-  bindingFromEvent,
-  COMMAND_LABELS,
-  COMMANDS,
-  DEFAULT_KEY_BINDINGS,
-  getKeyBindings,
-  keyLabel,
-  setKeyBindings,
-  type Command,
-  type KeyBinding,
-} from "../keybindings";
+import { bindingFromEvent, COMMANDS, isImeKey, setKeyBindings, type Command } from "../keybindings";
 import { remeasureEditor } from "../editor/Editor";
+import {
+  ColorsSection,
+  currentAssigned,
+  KeysSection,
+  MAX_FONT_SIZE,
+  MIN_FONT_SIZE,
+  refusal,
+  SizeField,
+  SnippetsSection,
+  TemplatesSection,
+  type Assigned,
+  type Keys,
+} from "./settingsParts";
 
 // 言語ごとの、今読めているスニペットと、ファイルを読めなかったときの理由（D-187・D-213）
 export type SnippetsViews = Record<Language, { loaded: LoadedSnippets | null; error: string | null }>;
 
-type Keys = Omit<KeyBinding, "command">;
-// コマンドごとの割り当て。null は「なし」
-type Assigned = Record<Command, Keys | null>;
-
-type Section = "keys" | "colors" | "view" | "problem" | "submit" | "notify" | "python" | "snippets" | "templates";
-
-const MIN_FONT_SIZE = 8;
-const MAX_FONT_SIZE = 32;
-
-// macOS とメニューの決まったキー（割り当てると、そちらが先に動く・使えなくなる）。押しても届かないものもある
-const RESERVED = new Set(["⌘Q", "⌘H", "⌥⌘H", "⌘M", "⌘C", "⌘V", "⌘X", "⌘Z", "⇧⌘Z", "⌘A", "⌃⌘F"]);
-
-// 今の割り当てを、コマンドごとの最初の 1 つにする（settings.json に同じコマンドが 2 つ以上あれば、先のもの）
-function currentAssigned(): Assigned {
-  const assigned = {} as Assigned;
-  for (const command of COMMANDS) {
-    const binding = getKeyBindings().find((item) => item.command === command);
-    assigned[command] = binding && binding.key !== "" ? toKeys(binding) : null;
-  }
-  return assigned;
-}
-
-function toKeys(binding: KeyBinding): Keys {
-  return { key: binding.key, meta: binding.meta, ctrl: binding.ctrl, alt: binding.alt, shift: binding.shift };
-}
-
-function defaultKeys(command: Command): Keys | null {
-  const binding = DEFAULT_KEY_BINDINGS.find((item) => item.command === command);
-  return binding ? toKeys(binding) : null;
-}
-
-function sameKeys(a: Keys | null, b: Keys | null): boolean {
-  return a === null || b === null ? a === b : keyLabel(a) === keyLabel(b);
-}
-
-// 割り当てられない理由。割り当てられるなら null
-function refusal(keys: Keys, command: Command, assigned: Assigned): string | null {
-  const label = keyLabel(keys);
-  if (RESERVED.has(label)) {
-    return `${label} は macOS やメニューで使うキーなので、割り当てられません`;
-  }
-  const functionKey = /^f([1-9]|1[0-9]|20)$/.test(keys.key);
-  if (!keys.meta && !keys.ctrl && !keys.alt && !functionKey) {
-    return "⌘・⌃・⌥ のどれかと一緒に押してください（F1〜F20 は、そのままでも使えます）";
-  }
-  for (const other of COMMANDS) {
-    if (other !== command && sameKeys(assigned[other], keys)) {
-      return `${label} は「${COMMAND_LABELS[other]}」に割り当てられています`;
-    }
-  }
-  return null;
-}
+type Section =
+  | "keys"
+  | "colors"
+  | "view"
+  | "problem"
+  | "submit"
+  | "notify"
+  | "past"
+  | "python"
+  | "snippets"
+  | "templates";
 
 type Props = {
   // 今使っている見た目（開いたとき・キャンセルしたときに戻すもの）
@@ -100,6 +64,8 @@ type Props = {
   submit: SubmitSettings;
   // 今の通知の設定（D-239）
   notify: NotifySettings;
+  // 今の AtCoder Problems の設定（AtCoder の ID。D-241）
+  atcoderProblems: AtcoderProblemsSettings;
   // 今使っている問題文の欄の設定（D-196・D-197）
   problem: ProblemSettings;
   // 今の Python の設定（D-221）。画面で変えるのは処理系だけ
@@ -112,6 +78,7 @@ type Props = {
     appearance: Appearance,
     submit: SubmitSettings,
     notify: NotifySettings,
+    atcoderProblems: AtcoderProblemsSettings,
     problem: ProblemSettings,
     interpreter: Interpreter,
   ) => void;
@@ -123,12 +90,15 @@ type Props = {
   onOpenSnippets: (language: Language) => Promise<void>;
   // 取り込んで読み直す。出す知らせを返す（キャンセルなら null）
   onImportSnippets: (language: Language) => Promise<string | null>;
+  // 「設定2で開く」（Phase 26。D-246）：設定の画面の形を editor にして保存できたら、App が中央のタブで開き直す
+  onSwitchToEditor: () => void;
 };
 
 function SettingsDialog({
   appearance,
   submit,
   notify,
+  atcoderProblems,
   problem,
   python,
   resetSeq,
@@ -139,12 +109,14 @@ function SettingsDialog({
   snippets,
   onOpenSnippets,
   onImportSnippets,
+  onSwitchToEditor,
 }: Props) {
   const [section, setSection] = useState<Section>("keys");
   const [assigned, setAssigned] = useState<Assigned>(currentAssigned);
   const [draft, setDraft] = useState<Appearance>(appearance);
   const [submitDraft, setSubmitDraft] = useState<SubmitSettings>(submit);
   const [notifyDraft, setNotifyDraft] = useState<NotifySettings>(notify);
+  const [pastDraft, setPastDraft] = useState<AtcoderProblemsSettings>(atcoderProblems);
   const [problemDraft, setProblemDraft] = useState<ProblemSettings>(problem);
   const [interpreterDraft, setInterpreterDraft] = useState<Interpreter>(python.interpreter);
   const [capturing, setCapturing] = useState<Command | null>(null);
@@ -161,6 +133,7 @@ function SettingsDialog({
     setDraft(appearance);
     setSubmitDraft(submit);
     setNotifyDraft(notify);
+    setPastDraft(atcoderProblems);
     setProblemDraft(problem);
     setInterpreterDraft(python.interpreter);
     setCapturing(null);
@@ -184,7 +157,8 @@ function SettingsDialog({
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
       if (capturing === null) {
-        if (event.key === "Escape") {
+        // 日本語入力の変換を取り消す Esc では、設定の画面を閉じない（C-6）
+        if (event.key === "Escape" && !isImeKey(event)) {
           event.preventDefault();
           cancel();
         }
@@ -252,7 +226,9 @@ function SettingsDialog({
     setDraft((current) => ({ ...current, [which]: clamped }));
   }
 
-  async function save() {
+  // ui を渡したら、設定の画面の形をそれにして保存する（「設定2で開く」）
+  async function save(ui?: "editor") {
+    const appearanceToSave = ui ? { ...draft, settingsUi: ui } : draft;
     const bindings: LoadedKeyBinding[] = COMMANDS.map((command) => {
       const keys = assigned[command];
       return keys
@@ -261,7 +237,15 @@ function SettingsDialog({
     });
     setSaving(true);
     try {
-      const outcome = await saveSettings(bindings, draft, submitDraft, notifyDraft, problemDraft, interpreterDraft);
+      const outcome = await saveSettings(
+        bindings,
+        appearanceToSave,
+        submitDraft,
+        notifyDraft,
+        pastDraft,
+        problemDraft,
+        interpreterDraft,
+      );
       if (outcome === "changedOutside") {
         await onReload();
         return;
@@ -271,8 +255,11 @@ function SettingsDialog({
         return;
       }
       setKeyBindings(bindings);
-      onSaved(draft, submitDraft, notifyDraft, problemDraft, interpreterDraft);
+      onSaved(appearanceToSave, submitDraft, notifyDraft, pastDraft, problemDraft, interpreterDraft);
       onClose();
+      if (ui) {
+        onSwitchToEditor();
+      }
     } catch (e) {
       setNotice(String(e));
     } finally {
@@ -284,7 +271,16 @@ function SettingsDialog({
     <div className="settings-backdrop">
       <div className="settings-dialog" role="dialog" aria-modal="true" aria-label="設定">
         <div className="settings-head">
-          <div className="settings-tabs" role="tablist">
+          <div
+            className="settings-tabs"
+            role="tablist"
+            onWheel={(event) => {
+              // ホイールを縦に回したら、横に送る（エディタのタブの列と同じ。D-191）
+              if (Math.abs(event.deltaY) > Math.abs(event.deltaX)) {
+                event.currentTarget.scrollLeft += event.deltaY;
+              }
+            }}
+          >
             {(
               [
                 ["keys", "キー"],
@@ -293,6 +289,7 @@ function SettingsDialog({
                 ["problem", "問題文"],
                 ["submit", "提出"],
                 ["notify", "通知"],
+                ["past", "過去問"],
                 ["python", "Python"],
                 ["snippets", "スニペット"],
                 ["templates", "テンプレート"],
@@ -310,6 +307,15 @@ function SettingsDialog({
               </button>
             ))}
           </div>
+          <button
+            type="button"
+            className="settings-link"
+            title="今の変更も保存してから、設定2（VS Code 風。中央のタブ）で開き直します（設定の「表示」で戻せます）"
+            disabled={saving || capturing !== null}
+            onClick={() => void save("editor")}
+          >
+            設定2で開く
+          </button>
           <button type="button" className="settings-link" onClick={onOpenJson}>
             JSON で開く
           </button>
@@ -339,6 +345,26 @@ function SettingsDialog({
               draft={notifyDraft}
               onToggle={(which, on) => setNotifyDraft((current) => ({ ...current, [which]: on }))}
             />
+          )}
+          {section === "past" && (
+            <div className="settings-view">
+              <label className="settings-field">
+                AtCoder の ID
+                <input
+                  className="settings-text"
+                  value={pastDraft.user}
+                  placeholder="空ならログインしているアカウント"
+                  maxLength={16}
+                  spellCheck={false}
+                  onChange={(event) => setPastDraft({ user: event.target.value })}
+                />
+              </label>
+              <p className="settings-note">
+                中央の「過去問」のタブ（サイドバーの「コンテスト」の「過去問の一覧」で開きます）で、問題ごとの AC 状況を出すのに使います。空なら、ログインしているアカウントの
+                ID を使います（ログインしていなければ AC 状況は出さず、diff だけを出します）。ID は AtCoder Problems（kenkoooo.com。AtCoder
+                とは別の人が運営している非公式のサービス）に送り、公開されている提出を読みます。
+              </p>
+            </div>
           )}
           {section === "snippets" && (
             <div className="settings-view">
@@ -375,6 +401,7 @@ function SettingsDialog({
               draft={draft}
               onToggle={(which, on) => setDraft((current) => ({ ...current, [which]: on }))}
               onFontSize={setFontSize}
+              onUi={(ui) => setDraft((current) => ({ ...current, settingsUi: ui }))}
             />
           )}
         </div>
@@ -399,150 +426,16 @@ function SettingsDialog({
   );
 }
 
-function KeysSection({
-  assigned,
-  capturing,
-  onCapture,
-  onSet,
-}: {
-  assigned: Assigned;
-  capturing: Command | null;
-  onCapture: (command: Command | null) => void;
-  onSet: (command: Command, keys: Keys | null) => void;
-}) {
-  return (
-    <table className="settings-table">
-      <tbody>
-        {COMMANDS.map((command) => {
-          const keys = assigned[command];
-          const fallback = defaultKeys(command);
-          return (
-            <tr key={command}>
-              <td className="settings-name">{COMMAND_LABELS[command]}</td>
-              <td className="settings-key">
-                {capturing === command ? (
-                  <span className="settings-capturing">キーを押してください（Esc でやめる）</span>
-                ) : keys ? (
-                  <kbd>{keyLabel(keys)}</kbd>
-                ) : (
-                  <span className="settings-none">なし</span>
-                )}
-              </td>
-              <td className="settings-actions">
-                <button
-                  type="button"
-                  className="settings-link"
-                  onClick={() => onCapture(capturing === command ? null : command)}
-                >
-                  {capturing === command ? "やめる" : "変更"}
-                </button>
-                <button
-                  type="button"
-                  className="settings-link"
-                  disabled={keys === null || capturing !== null}
-                  onClick={() => onSet(command, null)}
-                >
-                  なし
-                </button>
-                <button
-                  type="button"
-                  className="settings-link"
-                  disabled={sameKeys(keys, fallback) || capturing !== null}
-                  onClick={() => onSet(command, fallback)}
-                >
-                  既定に戻す
-                </button>
-              </td>
-            </tr>
-          );
-        })}
-      </tbody>
-    </table>
-  );
-}
-
-function ColorsSection({
-  colors,
-  onSet,
-}: {
-  colors: Record<string, string>;
-  onSet: (name: string, value: string | null) => void;
-}) {
-  // 既定の色は、開いている間は変わらないので、一度だけ読む
-  const defaults = useMemo(
-    () =>
-      Object.fromEntries(
-        COLOR_GROUPS.flatMap((group) => group.items.map((item) => [item.name, defaultColor(item.name)])),
-      ),
-    [],
-  );
-  return (
-    <div>
-      {COLOR_GROUPS.map((group) => (
-        <section key={group.title} className="settings-group">
-          <h3>{group.title}</h3>
-          <table className="settings-table">
-            <tbody>
-              {group.items.map((item) => {
-                // settings.json に手で書いた読めない色は、既定の色として見せる
-                const written = colors[item.name];
-                const value = written !== undefined && splitColor(written) ? written : defaults[item.name];
-                const parts = splitColor(value) ?? { hex: "#000000", alpha: 100 };
-                return (
-                  <tr key={item.name}>
-                    <td className="settings-name" title={item.name}>
-                      {item.label}
-                    </td>
-                    <td className="settings-color">
-                      <span
-                        className="settings-swatch"
-                        style={{ backgroundImage: `linear-gradient(${value}, ${value})` }}
-                      />
-                      <input
-                        type="color"
-                        aria-label={`${item.label}の色`}
-                        value={parts.hex}
-                        onChange={(event) => onSet(item.name, joinColor(event.target.value, parts.alpha))}
-                      />
-                      <input
-                        type="range"
-                        min={0}
-                        max={100}
-                        aria-label={`${item.label}の濃さ`}
-                        value={parts.alpha}
-                        onChange={(event) => onSet(item.name, joinColor(parts.hex, Number(event.target.value)))}
-                      />
-                      <span className="settings-alpha">{parts.alpha}%</span>
-                    </td>
-                    <td className="settings-actions">
-                      <button
-                        type="button"
-                        className="settings-link"
-                        disabled={colors[item.name] === undefined}
-                        onClick={() => onSet(item.name, null)}
-                      >
-                        既定に戻す
-                      </button>
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </section>
-      ))}
-    </div>
-  );
-}
-
 function ViewSection({
   draft,
   onToggle,
   onFontSize,
+  onUi,
 }: {
   draft: Appearance;
   onToggle: (which: "indentRainbow" | "errorLens" | "breadcrumbs", on: boolean) => void;
   onFontSize: (which: "editorFontSize" | "problemFontSize", size: number) => void;
+  onUi: (ui: SettingsUi) => void;
 }) {
   const sizes = [
     ["editorFontSize", "エディタの文字の大きさ"],
@@ -577,6 +470,21 @@ function ViewSection({
       {sizes.map(([which, label]) => (
         <SizeField key={which} label={label} size={draft[which]} onChange={(size) => onFontSize(which, size)} />
       ))}
+      <label className="settings-check">
+        設定の画面
+        <select
+          className="settings-select"
+          value={draft.settingsUi}
+          onChange={(event) => onUi(event.target.value as SettingsUi)}
+        >
+          {SETTINGS_UIS.map(({ value, label }) => (
+            <option key={value} value={value}>
+              {label}
+            </option>
+          ))}
+        </select>
+      </label>
+      <p className="settings-note">保存すると、次に設定を開くときから、その形で開きます。</p>
     </div>
   );
 }
@@ -757,171 +665,6 @@ function ProblemSection({
         を読むコードを入れ、solve(); を for (int i = 0; i &lt; T; i++) solve(); にします。Python では、main() に T
         を読むコードを入れ、solve() を for _ in range(T): の中にします。
       </p>
-    </div>
-  );
-}
-
-// スニペット（Phase 13 作業 2。D-187）：言語ごとの、今読めているものの一覧と、ファイルを開く・VS Code から取り込む（D-213）
-function SnippetsSection({
-  language,
-  label,
-  snippets,
-  onOpen,
-  onImport,
-}: {
-  language: Language;
-  label: string;
-  snippets: { loaded: LoadedSnippets | null; error: string | null };
-  onOpen: () => void;
-  onImport: () => Promise<void>;
-}) {
-  const [importing, setImporting] = useState(false);
-  const list = [...(snippets.loaded?.snippets ?? [])].sort((a, b) =>
-    a.prefixes[0].localeCompare(b.prefixes[0], "ja"),
-  );
-  const problems = snippets.loaded?.problems ?? [];
-  return (
-    <div className="settings-snippets">
-      <div className="settings-actions-row">
-        <span className="settings-name">
-          {label}（{snippetsFile(language)}）：{list.length} 件
-        </span>
-        <button type="button" className="settings-link" onClick={onOpen}>
-          ファイルを開く
-        </button>
-        <button
-          type="button"
-          className="settings-link"
-          disabled={importing}
-          onClick={() => {
-            setImporting(true);
-            void onImport().finally(() => setImporting(false));
-          }}
-        >
-          VS Code から取り込む
-        </button>
-      </div>
-      {snippets.error && <p className="settings-warning">{snippets.error}</p>}
-      {problems.length > 0 && <p className="settings-warning">読めない項目：{problems.join("、")}</p>}
-      {list.length > 0 && (
-        <table className="settings-table">
-          <tbody>
-            {list.map((item) => (
-              <tr key={item.name}>
-                <td className="settings-snippet-prefix">{item.prefixes.join("、")}</td>
-                <td className="settings-name">{item.description ?? item.name}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      )}
-    </div>
-  );
-}
-
-// テンプレート（Phase 13 作業 3。D-188）：雛形のファイルの説明とあるかどうか、フォルダを開く。
-// Finder から戻ったときに、あるかどうかを確かめ直す
-function TemplatesSection({ onError }: { onError: (message: string) => void }) {
-  const [files, setFiles] = useState<TemplateFiles | null>(null);
-  useEffect(() => {
-    const refresh = () => {
-      templateFiles()
-        .then(setFiles)
-        .catch((e) => onError(String(e)));
-    };
-    refresh();
-    window.addEventListener("focus", refresh);
-    return () => window.removeEventListener("focus", refresh);
-  }, []);
-  const state = (present: boolean | undefined) =>
-    present === undefined ? "" : present ? "あり" : "なし（IDE の最小の雛形を使います）";
-  return (
-    <div className="settings-view">
-      <div className="settings-actions-row">
-        <span className="settings-name">templates/</span>
-        <button
-          type="button"
-          className="settings-link"
-          onClick={() => openTemplatesFolder().catch((e) => onError(String(e)))}
-        >
-          テンプレートのフォルダを開く
-        </button>
-      </div>
-      <p className="settings-note">
-        「コンテストを作る」「この問題を作る」で作る問題の中身になります。アプリのフォルダの templates/ に次のファイルを置きます（フォルダがなければ、開くときに作ります）。
-      </p>
-      <table className="settings-table">
-        <tbody>
-          <tr>
-            <td className="settings-snippet-prefix">main.rs</td>
-            <td className="settings-name">src/main.rs の中身</td>
-            <td className="settings-name">{state(files?.mainRs)}</td>
-          </tr>
-          <tr>
-            <td className="settings-snippet-prefix">dependencies.toml</td>
-            <td className="settings-name">Cargo.toml の [dependencies] の中身</td>
-            <td className="settings-name">{state(files?.dependencies)}</td>
-          </tr>
-          <tr>
-            <td className="settings-snippet-prefix">main.cpp</td>
-            <td className="settings-name">C++ の main.cpp の中身</td>
-            <td className="settings-name">{state(files?.mainCpp)}</td>
-          </tr>
-          <tr>
-            <td className="settings-snippet-prefix">main.py</td>
-            <td className="settings-name">Python の main.py の中身</td>
-            <td className="settings-name">{state(files?.mainPy)}</td>
-          </tr>
-        </tbody>
-      </table>
-    </div>
-  );
-}
-
-// 文字の大きさの欄。打っている途中の数（範囲の外・空）は、当てずに欄にだけ残す。欄を離れたら、今の大きさに戻す
-function SizeField({ label, size, onChange }: { label: string; size: number; onChange: (size: number) => void }) {
-  const [text, setText] = useState(String(size));
-  useEffect(() => setText(String(size)), [size]);
-  return (
-    <div className="settings-size">
-      <span className="settings-name">{label}</span>
-      <button
-        type="button"
-        className="settings-step"
-        aria-label={`${label}を小さく`}
-        disabled={size <= MIN_FONT_SIZE}
-        onClick={() => onChange(size - 1)}
-      >
-        −
-      </button>
-      <input
-        type="number"
-        min={MIN_FONT_SIZE}
-        max={MAX_FONT_SIZE}
-        step={1}
-        aria-label={label}
-        value={text}
-        onChange={(event) => {
-          setText(event.target.value);
-          const next = Number(event.target.value);
-          if (Number.isInteger(next) && next >= MIN_FONT_SIZE && next <= MAX_FONT_SIZE) {
-            onChange(next);
-          }
-        }}
-        onBlur={() => setText(String(size))}
-      />
-      <button
-        type="button"
-        className="settings-step"
-        aria-label={`${label}を大きく`}
-        disabled={size >= MAX_FONT_SIZE}
-        onClick={() => onChange(size + 1)}
-      >
-        ＋
-      </button>
-      <span className="settings-unit">
-        px（{MIN_FONT_SIZE}〜{MAX_FONT_SIZE}）
-      </span>
     </div>
   );
 }

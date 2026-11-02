@@ -485,6 +485,62 @@ fn local_headers(source: &str) -> Vec<String> {
         .collect()
 }
 
+// 提出するソースと一緒に変わりうる手元のファイル（C-10）。サンプルテストのあとで、これらが変わっていないかも確かめる。
+// Rust は `mod x;` の先（ソースと同じフォルダの x.rs・x/mod.rs。bin のファイルもクレートの根なので同じ）、
+// C++ は `#include "x"` の自作のヘッダー（ソースのフォルダから）、Python は同じフォルダの .py（自作のモジュール）。
+// あるかどうかは見ない（ないファイルは呼び出し側で飛ばす）
+fn related_files(language: Language, source_path: &Path, source: &str) -> Vec<PathBuf> {
+    let Some(folder) = source_path.parent() else {
+        return Vec::new();
+    };
+    match language {
+        Language::Rust => module_files(source)
+            .into_iter()
+            .flat_map(|name| {
+                [
+                    folder.join(format!("{name}.rs")),
+                    folder.join(&name).join("mod.rs"),
+                ]
+            })
+            .collect(),
+        Language::Cpp => local_headers(source)
+            .into_iter()
+            .map(|name| folder.join(name))
+            .collect(),
+        Language::Python => std::fs::read_dir(folder)
+            .map(|entries| {
+                entries
+                    .filter_map(|entry| Some(entry.ok()?.path()))
+                    .filter(|path| {
+                        path != source_path && path.extension().is_some_and(|ext| ext == "py")
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+    }
+}
+
+// ソースと一緒に変わりうるファイル（related_files）のうち、いちばん新しい更新日時（ミリ秒）。
+// ソースの更新日時を読めなければ None（変わったものとして扱う）
+fn sources_modified_ms(language: Language, source_path: &Path, source: &str) -> Option<u64> {
+    let modified_ms = |path: &Path| {
+        std::fs::metadata(path)
+            .ok()?
+            .modified()
+            .ok()?
+            .duration_since(UNIX_EPOCH)
+            .ok()
+            .map(|modified| modified.as_millis() as u64)
+    };
+    let main = modified_ms(source_path)?;
+    Some(
+        related_files(language, source_path, source)
+            .iter()
+            .filter_map(|path| modified_ms(path))
+            .fold(main, u64::max),
+    )
+}
+
 // ---- ページの読み取り ----
 
 fn squash(text: &str) -> String {
@@ -811,6 +867,8 @@ pub struct Remote {
     min_interval: Duration,
     // 判定を追う時間の上限（10 分）
     cap: Duration,
+    // 判定の状態を読めなかったとき、読み直すまでの間隔（5 秒。C-1）
+    retry_wait: Duration,
     last: Mutex<Option<Instant>>,
 }
 
@@ -823,6 +881,7 @@ impl Remote {
             first_wait: Duration::from_secs(5),
             min_interval: Duration::from_secs(1),
             cap: Duration::from_secs(600),
+            retry_wait: Duration::from_secs(5),
             last: Mutex::new(None),
         }
     }
@@ -1031,6 +1090,8 @@ pub fn submit_flow(
     task: &str,
     key: u64,
     last_test: String,
+    // このアプリで前に送った提出の ID（取り違えを防ぐ。C-2）
+    known_ids: &[u64],
     confirm: impl FnOnce(&Confirmation) -> bool,
     on_user: impl Fn(Option<String>),
 ) -> SubmitOutcome {
@@ -1200,10 +1261,18 @@ pub fn submit_flow(
     }
     // 6. 提出の ID（自分の提出の一覧の、その問題のいちばん新しいもの）
     let since = (sent_ms / 1000) as i64 - CLOCK_SLACK_SECS;
-    let id = remote
-        .get(&me)
-        .ok()
-        .and_then(|reply| newest_submission(&reply.body, contest, task, since));
+    let read_id = || {
+        remote
+            .get(&me)
+            .ok()
+            .and_then(|reply| newest_submission(&reply.body, contest, task, since))
+    };
+    let mut id = read_id();
+    // このアプリで前に送った提出の ID なら、一覧にまだ今回の提出が出ていない。1 回だけ読み直し、
+    // それでも同じなら、前の提出と取り違えないように ID を決めない（C-2）
+    if id.is_some_and(|id| known_ids.contains(&id)) {
+        id = read_id().filter(|id| !known_ids.contains(id));
+    }
     match id {
         Some(id) => {
             view.submission_id = Some(id);
@@ -1239,6 +1308,9 @@ pub enum Update {
     Unreadable(String),
 }
 
+// 判定の状態を読めなかったときに読み直す回数の上限（C-1）
+const TRACK_RETRIES: u32 = 3;
+
 // 次に読むまでの間隔：サーバーの Interval のとおり。ただし下限（1 秒）より短くしない
 fn next_wait(interval_ms: u64, min: Duration) -> Duration {
     Duration::from_millis(interval_ms).max(min)
@@ -1259,26 +1331,37 @@ pub fn track(
         Duration::ZERO
     };
     let path = format!("/contests/{contest}/submissions/me/status/json?reload=true&sids[]={id}");
+    // 続けて読めなかった回数（読めたら 0 に戻す。C-1）
+    let mut failures = 0;
     loop {
         std::thread::sleep(wait);
-        let reply = match remote.get(&path) {
-            Ok(reply) if reply.status == 200 => reply,
-            Ok(reply) => {
-                on(Update::Unreadable(format!(
-                    "判定の状態を読めません（HTTP {}）",
-                    reply.status
-                )));
-                return;
-            }
-            Err(error) => {
-                on(Update::Unreadable(error));
-                return;
-            }
+        let read = match remote.get(&path) {
+            Ok(reply) if reply.status == 200 => parse_status(&reply.body, id),
+            Ok(reply) => Err(format!("判定の状態を読めません（HTTP {}）", reply.status)),
+            Err(error) => Err(error),
         };
-        let (judge, interval) = match parse_status(&reply.body, id) {
-            Ok(parsed) => parsed,
+        let (judge, interval) = match read {
+            Ok(parsed) => {
+                failures = 0;
+                parsed
+            }
+            // 一時的な失敗（混んでいるときの 5xx・通信の失敗など）なら、間隔を空けて読み直す。
+            // ログインが切れたときと、上限の回数・時間を過ぎたときは止める
+            Err(error)
+                if error != NOT_LOGGED_IN
+                    && failures < TRACK_RETRIES
+                    && Instant::now() + remote.retry_wait <= deadline =>
+            {
+                failures += 1;
+                wait = remote.retry_wait;
+                continue;
+            }
             Err(error) => {
-                on(Update::Unreadable(error));
+                on(Update::Unreadable(if failures > 0 {
+                    format!("{error}（{failures} 回読み直しても読めませんでした）")
+                } else {
+                    error
+                }));
                 return;
             }
         };
@@ -1643,12 +1726,18 @@ pub fn submit<R: Runtime>(
         .as_ref()
         .and_then(|place| history::entries_for(&place.dir, &place.workspace).ok())
         .unwrap_or_default();
+    // ソースと、mod の先・自作のヘッダー・自作のモジュールのうち、いちばん新しい更新日時（C-10）
     let source_modified_ms = source_path
         .as_deref()
-        .and_then(|path| std::fs::metadata(path).ok()?.modified().ok())
-        .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
-        .map(|modified| modified.as_millis() as u64);
+        .and_then(|path| sources_modified_ms(prepared.language, path, &prepared.source));
     let gate = sample_gate(&entries, target, source_modified_ms, checks.has_cases);
+    // このアプリで前に送った、同じコンテストの提出の ID（C-2）
+    let known_ids: Vec<u64> = state
+        .views()
+        .iter()
+        .filter(|view| view.contest == contest)
+        .filter_map(|view| view.submission_id)
+        .collect();
     if let SampleGate::Failed { reason } = &gate
         && checks.settings.test_before_submit
     {
@@ -1668,6 +1757,7 @@ pub fn submit<R: Runtime>(
         task,
         key,
         last_test,
+        &known_ids,
         |confirmation| {
             if skip_dialog.is_some() {
                 return true;
@@ -2030,8 +2120,16 @@ pub struct ContestPeriod {
     pub end: i64,
 }
 
-pub fn contest_period(remote: &Remote, contest: &str) -> Result<ContestPeriod, String> {
+// refresh なら、覚えているものを使わずに読み直す（覚えている終了時刻を過ぎたときに 1 回だけ。延長に追いつくため。C-3）
+pub fn contest_period(
+    remote: &Remote,
+    contest: &str,
+    refresh: bool,
+) -> Result<ContestPeriod, String> {
     crate::problem::ProblemId::new(contest, "x")?;
+    if refresh {
+        crate::standings::forget_contest_info(contest);
+    }
     let info = read_contest_info(remote, contest)?;
     Ok(ContestPeriod {
         start: info.start,
@@ -2277,6 +2375,7 @@ mod tests {
             first_wait: Duration::ZERO,
             min_interval: Duration::from_millis(1),
             cap: Duration::from_secs(5),
+            retry_wait: Duration::from_millis(1),
             last: Mutex::new(None),
         }
     }
@@ -2885,6 +2984,127 @@ mod tests {
         }
     }
 
+    // 自分の提出の一覧に、今回の提出（125）が 2 回目から出る・最後まで出ないとき（C-2）。
+    // 前にこのアプリで送った同じ問題の提出（123）を、今回の提出と取り違えない
+    #[test]
+    fn does_not_mistake_an_earlier_submission_for_the_new_one() {
+        let keychain = TestKeychain::new("submit-known-id");
+        keychain.0.save("session").unwrap();
+        for (shown_from, expected) in [(1, Some(125)), (usize::MAX, None)] {
+            let (base, seen) = fake(Arc::new(move |request: &Request, nth: usize| {
+                if request.target == "/contests/x/submissions/me" {
+                    let now = now_secs();
+                    let mut rows = vec![("x_a", 123, now - 30)];
+                    if nth >= shown_from {
+                        rows.push(("x_a", 125, now));
+                    }
+                    return ok(&mine_page("x", &rows));
+                }
+                contest_routes(|_| redirect("/contests/x/submissions/me", None))(request, nth)
+            }));
+            let outcome = submit_flow(
+                &remote(&keychain, &base),
+                &prepared(),
+                "x",
+                "x_a",
+                8,
+                String::new(),
+                &[123],
+                |_| true,
+                |_| {},
+            );
+            let SubmitOutcome::Sent { submission, .. } = outcome else {
+                panic!("{outcome:?}");
+            };
+            assert_eq!(submission.submission_id, expected);
+            let state = if expected.is_some() {
+                SubmissionState::Waiting
+            } else {
+                SubmissionState::UnknownId
+            };
+            assert_eq!(submission.state, state);
+            // 一覧は 2 回まで（1 回だけ読み直す）
+            let mine = seen
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|r| r.target == "/contests/x/submissions/me")
+                .count();
+            assert_eq!(mine, 2);
+        }
+        // 前に送った提出がなければ、今までどおり 1 回で決める
+        let (base, _) = fake(contest_routes(|_| {
+            redirect("/contests/x/submissions/me", None)
+        }));
+        let outcome = submit_flow(
+            &remote(&keychain, &base),
+            &prepared(),
+            "x",
+            "x_a",
+            9,
+            String::new(),
+            &[100],
+            |_| true,
+            |_| {},
+        );
+        let SubmitOutcome::Sent { submission, .. } = outcome else {
+            panic!("{outcome:?}");
+        };
+        assert_eq!(submission.submission_id, Some(123));
+    }
+
+    // サンプルテストのあとで変わったかを、mod の先・自作のヘッダー・自作のモジュールでも確かめる（C-10）
+    #[test]
+    fn checks_related_files_for_changes_after_the_test() {
+        let dir =
+            std::env::temp_dir().join(format!("atcoder-studio-related-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src/bin/geo")).unwrap();
+        let at = |ms: u64| UNIX_EPOCH + Duration::from_millis(ms);
+        let write = |path: &str, ms: u64| {
+            let path = dir.join(path);
+            std::fs::write(&path, "x").unwrap();
+            std::fs::File::options()
+                .write(true)
+                .open(&path)
+                .unwrap()
+                .set_modified(at(ms))
+                .unwrap();
+        };
+        // Rust：a.rs が読む util.rs（同じフォルダ）と geo/mod.rs は見る。読まない b.rs（ほかの問題）は見ない
+        write("src/bin/a.rs", 1_000);
+        write("src/bin/util.rs", 2_000);
+        write("src/bin/geo/mod.rs", 3_000);
+        write("src/bin/b.rs", 9_000);
+        let a = dir.join("src/bin/a.rs");
+        let source = "mod util;\npub mod geo;\n// mod b;\nfn main() {}\n";
+        assert_eq!(sources_modified_ms(Language::Rust, &a, source), Some(3_000));
+        assert_eq!(
+            sources_modified_ms(Language::Rust, &a, "fn main() {}"),
+            Some(1_000)
+        );
+        // C++：自作のヘッダーは見る。<…> のヘッダーは見ない
+        write("main.cpp", 1_000);
+        write("lib.hpp", 5_000);
+        let cpp = dir.join("main.cpp");
+        let source = "#include <bits/stdc++.h>\n#include \"lib.hpp\"\nint main() {}\n";
+        assert_eq!(
+            sources_modified_ms(Language::Cpp, &cpp, source),
+            Some(5_000)
+        );
+        // Python：同じフォルダの .py は見る
+        write("main.py", 1_000);
+        write("helper.py", 7_000);
+        let py = dir.join("main.py");
+        assert_eq!(sources_modified_ms(Language::Python, &py, ""), Some(7_000));
+        // ソースがなければ None（変わったものとして扱う）
+        assert_eq!(
+            sources_modified_ms(Language::Rust, &dir.join("src/main.rs"), ""),
+            None
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn submits_in_the_contest_period_and_tracks_the_judge() {
         let keychain = TestKeychain::new("submit-flow");
@@ -2902,6 +3122,7 @@ mod tests {
             "x_a",
             7,
             "まだ".to_string(),
+            &[],
             |confirmation| {
                 asked = Some(confirmation.clone());
                 true
@@ -2985,6 +3206,7 @@ mod tests {
             "x_a",
             1,
             String::new(),
+            &[],
             |_| false,
             |_| {},
         );
@@ -3007,6 +3229,7 @@ mod tests {
             "x_a",
             1,
             String::new(),
+            &[],
             |_| true,
             |_| {},
         );
@@ -3044,6 +3267,7 @@ mod tests {
             "x_a",
             1,
             String::new(),
+            &[],
             |_| true,
             |_| {},
         );
@@ -3069,6 +3293,7 @@ mod tests {
             "x_a",
             1,
             String::new(),
+            &[],
             |_| true,
             |_| {},
         );
@@ -3094,6 +3319,7 @@ mod tests {
             "abc480_a",
             1,
             String::new(),
+            &[],
             |_| true,
             |_| {},
         );
@@ -3134,6 +3360,7 @@ mod tests {
             "x_a",
             1,
             String::new(),
+            &[],
             |_| true,
             |_| {},
         );
@@ -3161,19 +3388,50 @@ mod tests {
     fn stops_tracking_when_the_status_cannot_be_read() {
         let keychain = TestKeychain::new("submit-unreadable");
         keychain.0.save("session").unwrap();
-        let (base, _) = fake(Arc::new(|_: &Request, _| {
+        let (base, seen) = fake(Arc::new(|_: &Request, _| {
             "HTTP/1.1 403 Forbidden\r\nContent-Length: 15\r\nConnection: close\r\n\r\nRequest blocked".to_string()
         }));
         let mut updates = Vec::new();
         track(&remote(&keychain, &base), "x", 123, false, &mut |update| {
             updates.push(update)
         });
+        // 3 回読み直してから止める（C-1）
         assert_eq!(
             updates,
             vec![Update::Unreadable(
-                "判定の状態を読めません（HTTP 403）".to_string()
+                "判定の状態を読めません（HTTP 403）（3 回読み直しても読めませんでした）"
+                    .to_string()
             )]
         );
+        assert_eq!(seen.lock().unwrap().len(), 4);
+
+        // 一時的に読めなくても、読み直して判定まで追う（読めない・壊れた JSON・判定中・AC の順）
+        let (base, seen) = fake(Arc::new(|_: &Request, nth| match nth {
+            0 => "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                .to_string(),
+            1 => ok("<html>busy</html>"),
+            2 => ok(STATUS_JUDGING),
+            _ => ok(STATUS_AC_123),
+        }));
+        let mut updates = Vec::new();
+        track(&remote(&keychain, &base), "x", 123, false, &mut |update| {
+            updates.push(update)
+        });
+        let Some(Update::Judge {
+            judge,
+            tracking: false,
+            message: None,
+        }) = updates.last()
+        else {
+            panic!("{updates:?}");
+        };
+        assert_eq!(judge.label, "AC");
+        assert!(
+            !updates
+                .iter()
+                .any(|update| matches!(update, Update::Unreadable(_)))
+        );
+        assert_eq!(seen.lock().unwrap().len(), 4);
 
         // 判定中のまま上限の時間を過ぎたら止める
         let (base, seen) = fake(Arc::new(|_: &Request, _| ok(STATUS_JUDGING)));
@@ -3714,37 +3972,46 @@ mod tests {
         let keychain = TestKeychain::new("contest-period");
         keychain.0.save("session").unwrap();
         let now = now_secs();
-        let (base, seen) = fake(Arc::new(move |request: &Request, _| {
+        let (base, seen) = fake(Arc::new(move |request: &Request, nth| {
             match request.target.as_str() {
+                // 2 回目からは、10 分延長したページ
                 "/contests/period22" => ok(&format!(
                     "{}<span class=\"mr-2\">Rated対象: - </span>",
-                    top_page(now + 600, now + 1200)
+                    top_page(now + 600, now + 1200 + if nth > 0 { 600 } else { 0 })
                 )),
                 _ => not_found(),
             }
         }));
         let remote = remote(&keychain, &base);
-        let period = contest_period(&remote, "period22").unwrap();
+        let period = contest_period(&remote, "period22", false).unwrap();
         assert_eq!(period.end - period.start, 600);
         assert!((period.start - (now + 600)).abs() <= 60);
         // 2 回目は覚えたものを使う。ページはセッションなしで読む
-        assert_eq!(contest_period(&remote, "period22").unwrap(), period);
+        assert_eq!(contest_period(&remote, "period22", false).unwrap(), period);
         {
             let seen = seen.lock().unwrap();
             assert_eq!(seen.len(), 1);
             assert!(!seen[0].head.contains("Cookie:"));
         }
+        // refresh なら読み直し、延びた終了時刻を返して覚え直す（C-3）
+        let extended = contest_period(&remote, "period22", true).unwrap();
+        assert_eq!(extended.end - period.end, 600);
+        assert_eq!(
+            contest_period(&remote, "period22", false).unwrap(),
+            extended
+        );
+        assert_eq!(seen.lock().unwrap().len(), 2);
         // 読めないときは理由を返し、覚えない（次にまた読む）
         assert!(
-            contest_period(&remote, "period22b")
+            contest_period(&remote, "period22b", false)
                 .unwrap_err()
                 .contains("HTTP 404")
         );
-        assert!(contest_period(&remote, "period22b").is_err());
-        assert_eq!(seen.lock().unwrap().len(), 3);
+        assert!(contest_period(&remote, "period22b", false).is_err());
+        assert_eq!(seen.lock().unwrap().len(), 4);
         // コンテストの ID の形が違えば読まない
-        assert!(contest_period(&remote, "../x").is_err());
-        assert_eq!(seen.lock().unwrap().len(), 3);
+        assert!(contest_period(&remote, "../x", false).is_err());
+        assert_eq!(seen.lock().unwrap().len(), 4);
     }
 
     #[test]

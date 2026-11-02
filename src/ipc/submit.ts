@@ -179,8 +179,9 @@ export function contestStatus(contest: string): Promise<StatusOutcome> {
 // Rust 側がトップページをログインなしで読み、アプリを開いている間は覚えておく
 export type ContestPeriod = { start: number; end: number };
 
-export function contestPeriod(contest: string): Promise<ContestPeriod> {
-  return invoke<ContestPeriod>("contest_period", { contest });
+// refresh なら、Rust 側が覚えているものを使わずに読み直す（覚えている終了時刻を過ぎたとき。C-3）
+export function contestPeriod(contest: string, refresh = false): Promise<ContestPeriod> {
+  return invoke<ContestPeriod>("contest_period", { contest, refresh });
 }
 
 // 残り時間を出しているコンテストを Rust 側に伝える（出していなければ null）。まだ始まっていなければ、Rust 側が

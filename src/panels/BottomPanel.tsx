@@ -4,7 +4,7 @@ import type { LogEntry } from "./runLog";
 import { copyText } from "./copyText";
 import { splitLocations, type Location } from "./logLinks";
 import HistoryView from "./HistoryView";
-import TestResults, { type TestState } from "./TestResults";
+import TestResults, { AddCase, type TestState } from "./TestResults";
 import DebugConsole from "./DebugConsole";
 import type { ConsoleEntry } from "./debugView";
 import type { HistoryEntry } from "../ipc/history";
@@ -50,6 +50,9 @@ type Props = {
   // 「出力を期待出力として保存」（Phase 4a 作業 3）と、その結果の知らせ
   onSaveExpected: (result: CaseResult) => void;
   testNotice: string | null;
+  // 「テストケースを足す」（Phase 25 作業 1。D-243）。addCaseBlocked は押せない理由。足せたら true
+  addCaseBlocked: string | null;
+  onAddCase: (input: string, expected: string) => Promise<boolean>;
   // 実行履歴（Phase 4a 作業 4）。null なら作業領域を開いていない
   history: HistoryEntry[] | null;
   onClearHistory: () => void;
@@ -205,6 +208,8 @@ function BottomPanel({
   consoleBlocked,
   onEvaluate,
   onSaveExpected,
+  addCaseBlocked,
+  onAddCase,
   testNotice,
   history,
   onClearHistory,
@@ -319,15 +324,25 @@ function BottomPanel({
           <DebugConsole entries={consoleEntries} inputBlocked={consoleBlocked} onEvaluate={onEvaluate} />
         ) : selected === "errors" && diagnostics ? (
           <DiagnosticsView diagnostics={diagnostics} onOpen={onOpenLocation} />
-        ) : selected === "results" && testState ? (
-          <TestResults
-            state={testState}
-            blocked={caseRunBlocked}
-            onRunCases={onRunCases}
-            onDebugCase={onDebugCase}
-            onSaveExpected={onSaveExpected}
-            notice={testNotice}
-          />
+        ) : selected === "results" ? (
+          <>
+            <AddCase blocked={addCaseBlocked} onAdd={onAddCase} />
+            {testState ? (
+              <TestResults
+                state={testState}
+                blocked={caseRunBlocked}
+                onRunCases={onRunCases}
+                onDebugCase={onDebugCase}
+                onSaveExpected={onSaveExpected}
+                notice={testNotice}
+              />
+            ) : (
+              <>
+                {testNotice && <div className="test-notice">{testNotice}</div>}
+                <div className="panel-empty">まだ実行していません</div>
+              </>
+            )}
+          </>
         ) : (
           <div className="panel-empty">まだ実行していません</div>
         )}

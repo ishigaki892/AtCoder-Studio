@@ -2,9 +2,19 @@ import type { WheelEvent } from "react";
 import FileIcon from "../sidebar/FileIcon";
 import type { Tab } from "./useTabs";
 
+// ファイルでないタブ（Phase 24 の「過去問」〔D-242〕・Phase 26 の「設定」〔D-246〕）。ファイルのタブの後ろに出す
+export type ExtraTab = {
+  label: string;
+  active: boolean;
+  onSelect: () => void;
+  onClose: () => void;
+};
+
 type Props = {
   tabs: Tab[];
   activePath: string | null;
+  // ファイルでないタブ（過去問・設定）。どれかが手前にあるときは、ファイルのタブはどれも手前にしない
+  extras: ExtraTab[];
   onSelect: (path: string) => void;
   onClose: (path: string) => void;
 };
@@ -64,15 +74,16 @@ function scrollSideways(event: WheelEvent<HTMLDivElement>) {
 }
 
 // エディタのタブの列（作業 4b、原典 §4.5「複数ファイルのタブ」）
-function TabBar({ tabs, activePath, onSelect, onClose }: Props) {
-  if (tabs.length === 0) {
+function TabBar({ tabs, activePath, extras, onSelect, onClose }: Props) {
+  if (tabs.length === 0 && extras.length === 0) {
     return null;
   }
+  const extraActive = extras.some((extra) => extra.active);
   return (
     <div className="tab-bar" role="tablist" onWheel={scrollSideways}>
       {tabs.map((tab) => {
         const { name, folder } = label(tab, tabs);
-        const active = tab.path === activePath;
+        const active = tab.path === activePath && !extraActive;
         return (
           <div
             key={tab.path}
@@ -105,6 +116,29 @@ function TabBar({ tabs, activePath, onSelect, onClose }: Props) {
           </div>
         );
       })}
+      {extras.map((extra) => (
+        <div
+          key={extra.label}
+          className={`tab ${extra.active ? "active" : ""}`}
+          role="tab"
+          aria-selected={extra.active}
+          title={extra.label}
+          onClick={extra.onSelect}
+        >
+          <span className="tab-name">{extra.label}</span>
+          <button
+            type="button"
+            className="tab-close"
+            aria-label={`${extra.label} を閉じる`}
+            onClick={(event) => {
+              event.stopPropagation();
+              extra.onClose();
+            }}
+          >
+            ×
+          </button>
+        </div>
+      ))}
     </div>
   );
 }
