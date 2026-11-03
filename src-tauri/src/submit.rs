@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use dom_query::Document;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::Value;
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
@@ -136,35 +136,8 @@ fn judge_version(name: &str) -> Option<&'static str> {
         .map(|(_, version)| *version)
 }
 
-// `cargo metadata --no-deps` の出力のうち、使うところだけ
-#[derive(Deserialize)]
-struct Metadata {
-    packages: Vec<MetaPackage>,
-    workspace_root: PathBuf,
-}
-
-#[derive(Deserialize)]
-struct MetaPackage {
-    manifest_path: PathBuf,
-    targets: Vec<MetaTarget>,
-    dependencies: Vec<MetaDependency>,
-}
-
-#[derive(Deserialize)]
-struct MetaTarget {
-    name: String,
-    kind: Vec<String>,
-    src_path: PathBuf,
-}
-
-#[derive(Deserialize)]
-struct MetaDependency {
-    name: String,
-    // crates.io なら `registry+…`、git なら `git+…`、パスなら null
-    source: Option<String>,
-    // 通常の依存は null、`dev`・`build`
-    kind: Option<String>,
-}
+// `cargo metadata --no-deps` の出力（Phase 29 で、依存の欄まで読む形を rust_bundle.rs に移した）
+use crate::rust_bundle::{Dependency as MetaDependency, Metadata};
 
 // Cargo.lock の、クレートの名前ごとの版
 fn locked_versions(lock: &str) -> HashMap<String, Vec<String>> {
@@ -255,6 +228,37 @@ fn module_files(source: &str) -> Vec<String> {
         .collect()
 }
 
+// `mod x;` を展開できなかったものの注意（Phase 28。D-250。確認のダイアログは省かない）
+pub fn rust_expand_warnings(expanded: &crate::rust_expand::Expanded) -> Vec<String> {
+    let list = |names: &[String]| {
+        names
+            .iter()
+            .map(|name| format!("mod {name};"))
+            .collect::<Vec<_>>()
+            .join("、")
+    };
+    let mut warnings = Vec::new();
+    if !expanded.missing.is_empty() {
+        warnings.push(format!(
+            "ファイルが見つからないモジュール（{}）があります。展開していません。ジャッジには、このファイルだけが置かれます",
+            list(&expanded.missing)
+        ));
+    }
+    if !expanded.path_attributes.is_empty() {
+        warnings.push(format!(
+            "#[path] の付いたモジュール（{}）は展開しません。ジャッジには、このファイルだけが置かれます",
+            list(&expanded.path_attributes)
+        ));
+    }
+    if !expanded.includes.is_empty() {
+        warnings.push(format!(
+            "展開したモジュール（{}）の include! などの相対パスは、展開すると提出するファイルからの相対になります",
+            expanded.includes.join("、")
+        ));
+    }
+    warnings
+}
+
 // 1 つのパッケージに問題ごとの bin を置く形で、bin の名前の末尾（例：`a`、`abc480-a` の `a`）と問題の記号（例：`_b`）が違う
 fn bin_task_warning(bins: &[String], bin: &str, task: &str) -> Option<String> {
     if bins.len() < 2 {
@@ -296,15 +300,39 @@ pub struct Prepared {
     pub warnings: Vec<String>,
     // Python の処理系（提出の言語の選択肢を決める。Phase 19 作業 4。D-224）。ほかの言語は None
     pub python: Option<Interpreter>,
+    // 展開したヘッダーの見せ方と場所（C++ の `#include "…"`。Phase 27。D-248）。ほかの言語は空
+    pub expanded: Vec<String>,
+    pub header_files: Vec<PathBuf>,
 }
 
 // bin のソースを読み、提出の前の検査をする。metadata は、パッケージのディレクトリ（dir）での `cargo metadata --no-deps` の出力
+// 自作の Rust のライブラリ（Phase 29。D-251）：libraries/rust/ の場所（canonicalize 済み。なければ None）と、
+// ライブラリのフォルダの `cargo metadata --no-deps` を読む方法
+pub struct RustLibraries<'a> {
+    pub root: Option<&'a Path>,
+    pub read_metadata: &'a dyn Fn(&Path) -> Result<String, String>,
+}
+
+// 展開したものを送る前にビルドして確かめるのに渡すもの（Phase 29。D-250・D-251）
+pub struct RustCheck<'a> {
+    pub metadata: &'a Metadata,
+    pub package: &'a crate::rust_bundle::Package,
+    pub source: &'a str,
+    // 入れたライブラリの依存の名前（作業用のパッケージに入れない）と、ライブラリが使う依存（足す）
+    pub bundled: &'a [String],
+    pub extra: &'a [MetaDependency],
+}
+
+// `mod x;`（Phase 28）か自作のライブラリ（Phase 29）を展開したときは、展開したものを check（作業用のパッケージでの
+// ビルド）に渡し、通らなければ送らない
 pub fn prepare(
     root: &Path,
     dir: &Path,
     metadata: &str,
     bin: &str,
     task: &str,
+    libraries: &RustLibraries,
+    check: impl FnOnce(&RustCheck) -> Result<(), String>,
 ) -> Result<Prepared, String> {
     let metadata: Metadata = serde_json::from_str(metadata)
         .map_err(|_| "cargo metadata の出力を読めません".to_string())?;
@@ -344,32 +372,100 @@ pub fn prepare(
         .join("/");
     let source = read_source(&path, &file)?;
     let mut warnings = Vec::new();
-    let modules = module_files(&source);
-    if !modules.is_empty() {
-        warnings.push(format!(
-            "別のファイルを読むモジュール（{}）があります。ジャッジには、このファイルだけが置かれます",
-            modules
-                .iter()
-                .map(|name| format!("mod {name};"))
-                .collect::<Vec<_>>()
-                .join("、")
-        ));
-    }
+    // 別のファイルを読む `mod x;` を展開する（Phase 28。D-250）。展開できなかったものだけ注意を出す
+    let expanded = crate::rust_expand::expand(&path, &source, dir)?;
+    warnings.extend(rust_expand_warnings(&expanded));
+    // 使っている自作のライブラリ（libraries/rust/ のパスの依存）を入れる（Phase 29。D-251）
+    let bundled = match libraries.root {
+        Some(library_root) => Some(crate::rust_bundle::bundle(
+            &expanded.source,
+            &package.dependencies,
+            library_root,
+            libraries.read_metadata,
+        )?),
+        None => None,
+    };
+    let (source, bundled_names, extra, library_labels, library_files) = match bundled {
+        Some(bundled) => {
+            warnings.extend(bundled.warnings);
+            (
+                bundled.source,
+                bundled.bundled,
+                bundled.extra_dependencies,
+                bundled.libraries,
+                bundled.files,
+            )
+        }
+        None => (
+            expanded.source,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        ),
+    };
+    // 入れたライブラリの依存には「パスの依存」の注意を出さない。ライブラリが使う依存も、ジャッジにあるかを確かめる
     let lock = std::fs::read_to_string(metadata.workspace_root.join("Cargo.lock")).ok();
-    warnings.extend(crate_warnings(&package.dependencies, lock.as_deref()));
+    let own: Vec<MetaDependency> = package
+        .dependencies
+        .iter()
+        .filter(|dependency| !bundled_names.contains(&dependency.name))
+        .cloned()
+        .collect();
+    for warning in crate_warnings(&own, lock.as_deref())
+        .into_iter()
+        .chain(crate_warnings(&extra, lock.as_deref()))
+    {
+        if !warnings.contains(&warning) {
+            warnings.push(warning);
+        }
+    }
     warnings.extend(bin_task_warning(&bins, bin, task));
+    let mut shown = expanded.modules;
+    shown.extend(
+        library_labels
+            .iter()
+            .map(|label| format!("ライブラリ {label}")),
+    );
+    let mut files = expanded.files;
+    files.extend(library_files);
+    if !shown.is_empty() {
+        if source.len() > SOURCE_LIMIT {
+            return Err(format!(
+                "モジュール・ライブラリを展開すると 512 KiB を超えるので送りません（{:.1} KiB）",
+                source.len() as f64 / 1024.0
+            ));
+        }
+        check(&RustCheck {
+            metadata: &metadata,
+            package,
+            source: &source,
+            bundled: &bundled_names,
+            extra: &extra,
+        })?;
+    }
     Ok(Prepared {
         language: Language::Rust,
         source,
         file,
         warnings,
         python: None,
+        expanded: shown,
+        header_files: files,
     })
 }
 
 // C++ の main.cpp を読み、提出の前の検査をする（Phase 16 作業 4。D-209）。dir はパッケージのディレクトリ。
 // gcc_version は手元の g++ の版（`-dumpfullversion`）。分からなければ None（版の注意は出さない）
-pub fn prepare_cpp(root: &Path, dir: &Path, gcc_version: Option<&str>) -> Result<Prepared, String> {
+// `#include "…"` は、隣のヘッダーと自作のライブラリ（dirs）から展開する（Phase 27。D-248）。ヘッダーを展開したときは、
+// 展開したものを check（g++ の文法の確かめ）に渡し、通らなければ送らない
+pub fn prepare_cpp(
+    root: &Path,
+    dir: &Path,
+    gcc_version: Option<&str>,
+    dirs: &crate::cpp_expand::SearchDirs,
+    check: impl FnOnce(&str) -> Result<(), String>,
+) -> Result<Prepared, String> {
     // ソースが、リンクなどで作業領域の外を指していないことを確かめる
     let path = dir
         .join(cpp::SOURCE)
@@ -384,16 +480,28 @@ pub fn prepare_cpp(root: &Path, dir: &Path, gcc_version: Option<&str>) -> Result
         .join("/");
     let source = read_source(&path, &file)?;
     let mut warnings = Vec::new();
-    let headers = local_headers(&source);
-    if !headers.is_empty() {
+    let expanded = crate::cpp_expand::expand(&path, &source, dirs)?;
+    // 展開できなかったものだけ注意を出す（D-237・D-248）
+    if !expanded.missing.is_empty() {
         warnings.push(format!(
-            "自分のヘッダーを読む #include（{}）があります。ジャッジには、このファイルだけが置かれます",
-            headers
+            "見つからないヘッダーを読む #include（{}）があります。隣のフォルダにも、ライブラリのフォルダ（アプリのフォルダの {}）にもないので展開していません。ジャッジには、このファイルだけが置かれます",
+            expanded
+                .missing
                 .iter()
                 .map(|name| format!("#include \"{name}\""))
                 .collect::<Vec<_>>()
-                .join("、")
+                .join("、"),
+            cpp::LIBRARY_DIR
         ));
+    }
+    if !expanded.headers.is_empty() {
+        if expanded.source.len() > SOURCE_LIMIT {
+            return Err(format!(
+                "ヘッダーを展開すると 512 KiB を超えるので送りません（{:.1} KiB）",
+                expanded.source.len() as f64 / 1024.0
+            ));
+        }
+        check(&expanded.source)?;
     }
     if let Some(version) = gcc_version
         && version != cpp::JUDGE_VERSION
@@ -405,10 +513,12 @@ pub fn prepare_cpp(root: &Path, dir: &Path, gcc_version: Option<&str>) -> Result
     }
     Ok(Prepared {
         language: Language::Cpp,
-        source,
+        source: expanded.source,
         file,
         warnings,
         python: None,
+        expanded: expanded.headers,
+        header_files: expanded.files,
     })
 }
 
@@ -434,11 +544,48 @@ pub fn prepare_python(
     let source = read_source(&path, &file)?;
     let interpreter = settings.interpreter;
     let mut warnings = Vec::new();
+    let mut prepared = source;
+    let mut expanded = Vec::new();
+    let mut files = Vec::new();
     match python::find_interpreter(settings) {
         Ok(found) => {
-            match python::imports(&found, &path) {
-                Ok(imports) => warnings.extend(python::submit_warnings(interpreter, &imports, dir)),
-                Err(reason) => warnings.push(reason),
+            // 自作のモジュール（main.py のフォルダと libraries/python/）を main.py に埋め込む（Phase 30。D-252）。
+            // 読めないファイルがあれば送らない。たどれなければ、入れずに注意を出す
+            let package_dir = path.parent().unwrap_or(dir);
+            let library = settings.library.as_deref();
+            match crate::py_bundle::find(&found, &path, package_dir, library) {
+                Ok(imports) => {
+                    warnings.extend(python::submit_warnings(
+                        interpreter,
+                        &imports,
+                        package_dir,
+                        library,
+                    ));
+                    let read = |module: &Path| {
+                        std::fs::read_to_string(module).map_err(|_| {
+                            format!(
+                                "「{}」を読めません",
+                                crate::py_bundle::shown(module, package_dir, library)
+                            )
+                        })
+                    };
+                    if let Some(bundled) =
+                        crate::py_bundle::bundle(&prepared, &imports, package_dir, library, &read)?
+                    {
+                        if bundled.source.len() > SOURCE_LIMIT {
+                            return Err(format!(
+                                "自分のモジュールを入れると 512 KiB を超えるので送りません（{:.1} KiB）",
+                                bundled.source.len() as f64 / 1024.0
+                            ));
+                        }
+                        crate::py_bundle::check_syntax(&found, &bundled.source)?;
+                        prepared = bundled.source;
+                        expanded = bundled.modules;
+                        files = bundled.files;
+                    }
+                }
+                Err(crate::py_bundle::FindError::Unreadable(message)) => return Err(message),
+                Err(crate::py_bundle::FindError::Failed(message)) => warnings.push(message),
             }
             match python::version(&found) {
                 Ok(version) => warnings.extend(python::version_warning(interpreter, &version)),
@@ -452,10 +599,12 @@ pub fn prepare_python(
     }
     Ok(Prepared {
         language: Language::Python,
-        source,
+        source: prepared,
         file,
         warnings,
         python: Some(interpreter),
+        expanded,
+        header_files: files,
     })
 }
 
@@ -520,9 +669,14 @@ fn related_files(language: Language, source_path: &Path, source: &str) -> Vec<Pa
     }
 }
 
-// ソースと一緒に変わりうるファイル（related_files）のうち、いちばん新しい更新日時（ミリ秒）。
+// ソースと一緒に変わりうるファイル（related_files と、展開したヘッダー〔extra。D-248〕）のうち、いちばん新しい更新日時（ミリ秒）。
 // ソースの更新日時を読めなければ None（変わったものとして扱う）
-fn sources_modified_ms(language: Language, source_path: &Path, source: &str) -> Option<u64> {
+fn sources_modified_ms(
+    language: Language,
+    source_path: &Path,
+    source: &str,
+    extra: &[PathBuf],
+) -> Option<u64> {
     let modified_ms = |path: &Path| {
         std::fs::metadata(path)
             .ok()?
@@ -536,6 +690,7 @@ fn sources_modified_ms(language: Language, source_path: &Path, source: &str) -> 
     Some(
         related_files(language, source_path, source)
             .iter()
+            .chain(extra)
             .filter_map(|path| modified_ms(path))
             .fold(main, u64::max),
     )
@@ -954,6 +1109,8 @@ pub struct Confirmation {
     pub warnings: Vec<String>,
     // 注意に添える、ジャッジの環境の出どころ（言語ごと。D-209）
     pub judge_note: &'static str,
+    // 展開したヘッダー（C++。D-248）。size は展開したあとの大きさ
+    pub expanded: Vec<String>,
 }
 
 impl Confirmation {
@@ -974,6 +1131,18 @@ impl Confirmation {
             self.user.as_deref().unwrap_or("（分かりません）"),
             self.last_test,
         );
+        if !self.expanded.is_empty() {
+            // C++ はヘッダー（D-248）、Rust（D-250）と Python（D-252）はモジュール
+            let what = if self.file.ends_with(".rs") || self.file.ends_with(".py") {
+                "モジュール"
+            } else {
+                "ヘッダー"
+            };
+            text.push_str(&format!(
+                "\n展開した{what}：{}（大きさは展開したあとのもの）",
+                self.expanded.join("、")
+            ));
+        }
         if !self.warnings.is_empty() {
             text.push_str("\n\n注意：");
             for warning in &self.warnings {
@@ -1169,6 +1338,7 @@ pub fn submit_flow(
         user: form.as_ref().and_then(|form| form.user.clone()),
         last_test,
         warnings: prepared.warnings.clone(),
+        expanded: prepared.expanded.clone(),
         judge_note: match prepared.language {
             Language::Rust => JUDGE_CRATES_NOTE,
             Language::Cpp => cpp::JUDGE_SUBMIT_NOTE,
@@ -1727,9 +1897,14 @@ pub fn submit<R: Runtime>(
         .and_then(|place| history::entries_for(&place.dir, &place.workspace).ok())
         .unwrap_or_default();
     // ソースと、mod の先・自作のヘッダー・自作のモジュールのうち、いちばん新しい更新日時（C-10）
-    let source_modified_ms = source_path
-        .as_deref()
-        .and_then(|path| sources_modified_ms(prepared.language, path, &prepared.source));
+    let source_modified_ms = source_path.as_deref().and_then(|path| {
+        sources_modified_ms(
+            prepared.language,
+            path,
+            &prepared.source,
+            &prepared.header_files,
+        )
+    });
     let gate = sample_gate(&entries, target, source_modified_ms, checks.has_cases);
     // このアプリで前に送った、同じコンテストの提出の ID（C-2）
     let known_ids: Vec<u64> = state
@@ -2387,6 +2562,8 @@ mod tests {
             file: "src/bin/a.rs".to_string(),
             warnings: vec!["注意の例".to_string()],
             python: None,
+            expanded: Vec::new(),
+            header_files: Vec::new(),
         }
     }
 
@@ -2483,12 +2660,14 @@ mod tests {
         );
     }
 
+    // 自作の Rust のライブラリを使わないとき（Phase 29）
+    const NO_RUST_LIBRARIES: RustLibraries<'static> = RustLibraries {
+        root: None,
+        read_metadata: &|_| Err("読まない".to_string()),
+    };
+
     fn dependency(name: &str, source: Option<&str>, kind: Option<&str>) -> MetaDependency {
-        MetaDependency {
-            name: name.to_string(),
-            source: source.map(str::to_string),
-            kind: kind.map(str::to_string),
-        }
+        MetaDependency::named(name, source, kind)
     }
 
     #[test]
@@ -2556,27 +2735,38 @@ mod tests {
         let dir = root.join("abc480/abc480_a");
         let source = "#include <bits/stdc++.h>\n  # include \"lib/x.hpp\"\n// #include \"y.hpp\" も行ごとに見る\n#include<atcoder/all>\nint main() {}\n";
         std::fs::write(dir.join("main.cpp"), source).unwrap();
-        let prepared = prepare_cpp(&root, &dir, Some("15.2.0")).unwrap();
+        let prepared = prepare_cpp(&root, &dir, Some("15.2.0"), &NO_DIRS, no_check).unwrap();
         assert_eq!(prepared.language, Language::Cpp);
         assert_eq!(prepared.file, "abc480/abc480_a/main.cpp");
+        // 見つからないヘッダーは展開せず、元のまま送る。注意は、展開できなかったものだけ（D-248）
         assert_eq!(prepared.source, source);
-        assert_eq!(
-            prepared.warnings,
-            [
-                "自分のヘッダーを読む #include（#include \"lib/x.hpp\"）があります。ジャッジには、このファイルだけが置かれます"
-            ]
+        assert!(prepared.expanded.is_empty());
+        assert_eq!(prepared.warnings.len(), 1);
+        assert!(
+            prepared.warnings[0].starts_with(
+                "見つからないヘッダーを読む #include（#include \"lib/x.hpp\"）があります"
+            ),
+            "{:?}",
+            prepared.warnings
         );
         // 手元の GCC の版が違うと知らせる
         std::fs::write(dir.join("main.cpp"), "int main() {}\n").unwrap();
         assert_eq!(
-            prepare_cpp(&root, &dir, Some("14.2.0")).unwrap().warnings,
+            prepare_cpp(&root, &dir, Some("14.2.0"), &NO_DIRS, no_check)
+                .unwrap()
+                .warnings,
             ["手元の GCC（14.2.0）は、ジャッジ（15.2.0）と版が違います"]
         );
-        assert!(prepare_cpp(&root, &dir, None).unwrap().warnings.is_empty());
+        assert!(
+            prepare_cpp(&root, &dir, None, &NO_DIRS, no_check)
+                .unwrap()
+                .warnings
+                .is_empty()
+        );
         // 大きすぎる・作業領域の外を指すリンク・ない
         std::fs::write(dir.join("main.cpp"), vec![b'a'; SOURCE_LIMIT + 1]).unwrap();
         assert!(
-            prepare_cpp(&root, &dir, None)
+            prepare_cpp(&root, &dir, None, &NO_DIRS, no_check)
                 .unwrap_err()
                 .contains("512 KiB")
         );
@@ -2588,17 +2778,102 @@ mod tests {
         std::fs::remove_file(dir.join("main.cpp")).unwrap();
         std::os::unix::fs::symlink(&outside, dir.join("main.cpp")).unwrap();
         assert!(
-            prepare_cpp(&root, &dir, None)
+            prepare_cpp(&root, &dir, None, &NO_DIRS, no_check)
                 .unwrap_err()
                 .contains("作業領域の外")
         );
         std::fs::remove_file(dir.join("main.cpp")).unwrap();
         assert!(
-            prepare_cpp(&root, &dir, None)
+            prepare_cpp(&root, &dir, None, &NO_DIRS, no_check)
                 .unwrap_err()
                 .contains("main.cpp が見つかりません")
         );
         let _ = std::fs::remove_file(&outside);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // 展開するヘッダーを探す場所がないとき（隣のヘッダーだけを探す）と、文法の確かめを呼ばないことを確かめる関数
+    const NO_DIRS: crate::cpp_expand::SearchDirs = crate::cpp_expand::SearchDirs {
+        library: None,
+        ac_library: None,
+    };
+    fn no_check(_: &str) -> Result<(), String> {
+        panic!("ヘッダーを展開しないときは、文法を確かめない");
+    }
+
+    // ヘッダーを展開して送る（Phase 27。D-248）：確認に出す名前・更新日時を見るファイル・文法の確かめ・大きさ
+    #[test]
+    fn expands_headers_for_a_cpp_submission() {
+        let base = std::env::temp_dir().join(format!(
+            "atcoder-studio-submit-expand-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("ws/abc480/abc480_a")).unwrap();
+        std::fs::create_dir_all(base.join("lib")).unwrap();
+        let root = base.join("ws").canonicalize().unwrap();
+        let lib = base.join("lib").canonicalize().unwrap();
+        let dir = root.join("abc480/abc480_a");
+        std::fs::write(lib.join("seg.hpp"), "#pragma once\nstruct Seg {};\n").unwrap();
+        std::fs::write(
+            dir.join("main.cpp"),
+            "#include <bits/stdc++.h>\n#include \"seg.hpp\"\nint main() {}\n",
+        )
+        .unwrap();
+        let dirs = crate::cpp_expand::SearchDirs {
+            library: Some(&lib),
+            ac_library: None,
+        };
+        let checked = std::cell::RefCell::new(None);
+        let prepared = prepare_cpp(&root, &dir, None, &dirs, |source| {
+            *checked.borrow_mut() = Some(source.to_string());
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(prepared.expanded, ["seg.hpp"]);
+        assert_eq!(prepared.header_files, [lib.join("seg.hpp")]);
+        assert!(prepared.warnings.is_empty());
+        assert!(prepared.source.contains("struct Seg {};"));
+        assert!(!prepared.source.contains("#include \"seg.hpp\""));
+        // 確かめたのは、送るものと同じ
+        assert_eq!(checked.borrow().as_deref(), Some(prepared.source.as_str()));
+        // 確かめで通らなければ送らない
+        let error = prepare_cpp(
+            &root,
+            &dir,
+            None,
+            &dirs,
+            |_| Err("g++ のエラー".to_string()),
+        )
+        .unwrap_err();
+        assert_eq!(error, "g++ のエラー");
+        // 展開すると 512 KiB を超えるなら送らない（確かめる前に止める）
+        std::fs::write(lib.join("seg.hpp"), "a".repeat(SOURCE_LIMIT)).unwrap();
+        assert!(
+            prepare_cpp(&root, &dir, None, &dirs, no_check)
+                .unwrap_err()
+                .contains("512 KiB")
+        );
+        // 確認のダイアログに、展開したヘッダーを出す
+        let confirmation = Confirmation {
+            contest: "abc480".to_string(),
+            task: "abc480_a".to_string(),
+            task_title: "A".to_string(),
+            end_text: "2026-11-03 22:40:00+09:00".to_string(),
+            file: prepared.file.clone(),
+            size: prepared.source.len(),
+            language: "C++23 (GCC 15.2.0)".to_string(),
+            user: None,
+            last_test: "まだ".to_string(),
+            warnings: Vec::new(),
+            judge_note: "",
+            expanded: prepared.expanded.clone(),
+        };
+        assert!(
+            confirmation
+                .message()
+                .contains("展開したヘッダー：seg.hpp（大きさは展開したあとのもの）")
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -2640,6 +2915,7 @@ mod tests {
             last_test: "なし".into(),
             warnings: vec!["注意".into()],
             judge_note: cpp::JUDGE_SUBMIT_NOTE,
+            expanded: Vec::new(),
         };
         let message = confirmation.message();
         assert!(message.contains("言語：C++23 (GCC 15.2.0)"));
@@ -2710,16 +2986,51 @@ mod tests {
             prepared.warnings,
             ["手元に PyPy が見つからないので、import と版を確かめていません"]
         );
-        // 手元の CPython 3.13 があれば、import の注意が出る
-        if python::find_interpreter(&PythonSettings::default()).is_ok() {
-            let prepared = prepare_python(&root, &dir, &PythonSettings::default()).unwrap();
+        // 手元の CPython 3.13 があれば、隣の lib と libraries/python/ の mylib を埋め込み、import の注意が出る（D-252）
+        if let Ok(interpreter) = python::find_interpreter(&PythonSettings::default()) {
+            let library = root.join("libraries/python");
+            std::fs::create_dir_all(library.join("mylib")).unwrap();
+            std::fs::write(library.join("mylib/__init__.py"), "from .seg import N\n").unwrap();
+            std::fs::write(library.join("mylib/seg.py"), "N = 2\n").unwrap();
+            std::fs::write(dir.join("lib.py"), "M = 1\n").unwrap();
+            let source = "import sys\nimport lib\nimport mylib\ntry:\n    import requests\nexcept ImportError:\n    pass\nprint(lib.M + mylib.N)\n";
+            std::fs::write(dir.join("main.py"), source).unwrap();
+            let settings = PythonSettings {
+                library: Some(library.clone()),
+                ..PythonSettings::default()
+            };
+            let prepared = prepare_python(&root, &dir, &settings).unwrap();
             assert_eq!(prepared.python, Some(Interpreter::Cpython));
             assert_eq!(
-                prepared.warnings[..2],
+                prepared.warnings[..1],
+                ["ジャッジの CPython の言語の一覧にないパッケージ（requests）を import しています"]
+            );
+            assert_eq!(
+                prepared.expanded,
                 [
-                    "自分のモジュールを読む import（lib）があります。ジャッジには、このファイルだけが置かれます",
-                    "ジャッジの CPython の言語の一覧にないパッケージ（requests）を import しています",
+                    "lib（lib.py）",
+                    "mylib（libraries/python/mylib/__init__.py）",
+                    "mylib.seg（libraries/python/mylib/seg.py）"
                 ]
+            );
+            assert_eq!(prepared.header_files.len(), 3);
+            assert!(prepared.source.ends_with(source));
+            // 埋め込んだものを、別のフォルダに 1 つだけ置いて動かす
+            let alone = root.join("alone");
+            std::fs::create_dir_all(&alone).unwrap();
+            std::fs::write(alone.join("Main.py"), &prepared.source).unwrap();
+            let output = std::process::Command::new(&interpreter)
+                .current_dir(&alone)
+                .args(["-E", "-B", "Main.py"])
+                .output()
+                .unwrap();
+            assert_eq!(String::from_utf8_lossy(&output.stdout), "3\n");
+            // ライブラリに構文の誤りがあれば送らない（AC30-08）
+            std::fs::write(library.join("mylib/seg.py"), "N = (\n").unwrap();
+            let error = prepare_python(&root, &dir, &settings).unwrap_err();
+            assert!(
+                error.contains("「libraries/python/mylib/seg.py」の"),
+                "{error}"
             );
         } else {
             eprintln!("python3.13 がないので、import の検査は飛ばします");
@@ -2967,6 +3278,7 @@ mod tests {
             last_test: "全 3 件中 AC 3 件（10/26 20:10）".into(),
             warnings: vec!["クレート「serde」は、ジャッジにありません".into()],
             judge_note: JUDGE_CRATES_NOTE,
+            expanded: Vec::new(),
         };
         let message = confirmation.message();
         for part in [
@@ -3078,9 +3390,12 @@ mod tests {
         write("src/bin/b.rs", 9_000);
         let a = dir.join("src/bin/a.rs");
         let source = "mod util;\npub mod geo;\n// mod b;\nfn main() {}\n";
-        assert_eq!(sources_modified_ms(Language::Rust, &a, source), Some(3_000));
         assert_eq!(
-            sources_modified_ms(Language::Rust, &a, "fn main() {}"),
+            sources_modified_ms(Language::Rust, &a, source, &[]),
+            Some(3_000)
+        );
+        assert_eq!(
+            sources_modified_ms(Language::Rust, &a, "fn main() {}", &[]),
             Some(1_000)
         );
         // C++：自作のヘッダーは見る。<…> のヘッダーは見ない
@@ -3089,17 +3404,20 @@ mod tests {
         let cpp = dir.join("main.cpp");
         let source = "#include <bits/stdc++.h>\n#include \"lib.hpp\"\nint main() {}\n";
         assert_eq!(
-            sources_modified_ms(Language::Cpp, &cpp, source),
+            sources_modified_ms(Language::Cpp, &cpp, source, &[]),
             Some(5_000)
         );
         // Python：同じフォルダの .py は見る
         write("main.py", 1_000);
         write("helper.py", 7_000);
         let py = dir.join("main.py");
-        assert_eq!(sources_modified_ms(Language::Python, &py, ""), Some(7_000));
+        assert_eq!(
+            sources_modified_ms(Language::Python, &py, "", &[]),
+            Some(7_000)
+        );
         // ソースがなければ None（変わったものとして扱う）
         assert_eq!(
-            sources_modified_ms(Language::Rust, &dir.join("src/main.rs"), ""),
+            sources_modified_ms(Language::Rust, &dir.join("src/main.rs"), "", &[]),
             None
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -3454,6 +3772,108 @@ mod tests {
         assert!(seen.lock().unwrap().len() <= 4);
     }
 
+    // 自作のライブラリのクレートを入れて送る（Phase 29。D-251）：本物の cargo metadata で読み、パスの依存の注意を出さず、
+    // 送る前の確かめに、まとめたものと入れた依存の名前を渡す
+    #[test]
+    fn bundles_rust_libraries_for_a_submission() {
+        let Some(cargo) = crate::toolchain::find_cargo() else {
+            return;
+        };
+        let base = std::env::temp_dir().join(format!(
+            "atcoder-studio-submit-bundle-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("ws/pkg/src")).unwrap();
+        std::fs::create_dir_all(base.join("app/libraries/rust/mylib/src")).unwrap();
+        let base = base.canonicalize().unwrap();
+        let library_root = base.join("app/libraries/rust");
+        std::fs::write(
+            library_root.join("mylib/Cargo.toml"),
+            "[package]\nname = \"mylib\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[workspace]\n",
+        )
+        .unwrap();
+        std::fs::write(
+            library_root.join("mylib/src/lib.rs"),
+            "pub fn f() -> i32 { crate::g() }\nfn g() -> i32 { 1 }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            base.join("ws/pkg/Cargo.toml"),
+            format!(
+                "[package]\nname = \"pkg\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[dependencies]\nmylib = {{ path = {:?} }}\n\n[workspace]\n",
+                library_root.join("mylib").to_string_lossy()
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            base.join("ws/pkg/src/main.rs"),
+            "fn main() { println!(\"{}\", mylib::f()); }\n",
+        )
+        .unwrap();
+        let root = base.join("ws");
+        let dir = root.join("pkg");
+        let metadata = crate::toolchain::metadata_json(&cargo, &dir).unwrap();
+        let read_metadata = |library: &Path| crate::toolchain::metadata_json(&cargo, library);
+        let libraries = RustLibraries {
+            root: Some(&library_root),
+            read_metadata: &read_metadata,
+        };
+        let checked = std::cell::RefCell::new(None);
+        let prepared = prepare(
+            &root,
+            &dir,
+            &metadata,
+            "pkg",
+            "abc480_a",
+            &libraries,
+            |check| {
+                *checked.borrow_mut() = Some((check.source.to_string(), check.bundled.to_vec()));
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(prepared.expanded, ["ライブラリ mylib（src/lib.rs）"]);
+        assert_eq!(
+            prepared.header_files,
+            [library_root.join("mylib/src/lib.rs")]
+        );
+        assert!(prepared.source.contains("crate::mylib::f()"));
+        assert!(
+            prepared
+                .source
+                .contains("pub fn f() -> i32 { crate::mylib::g() }")
+        );
+        assert!(
+            !prepared.warnings.join("\n").contains("mylib"),
+            "{:?}",
+            prepared.warnings
+        );
+        let (source, bundled) = checked.borrow().clone().unwrap();
+        assert_eq!(source, prepared.source);
+        assert_eq!(bundled, ["mylib"]);
+        // 本物の cargo で、作業用のパッケージでビルドして確かめる
+        let parsed = crate::rust_bundle::parse_metadata(&metadata).unwrap();
+        let package = crate::rust_bundle::package_in(&parsed, &dir).unwrap();
+        assert_eq!(
+            crate::rust_check::check(&cargo, &parsed, package, &prepared.source, &bundled, &[]),
+            Ok(())
+        );
+        // 確かめで通らなければ送らない
+        let error = prepare(
+            &root,
+            &dir,
+            &metadata,
+            "pkg",
+            "abc480_a",
+            &libraries,
+            |_| Err("ビルドのエラー".to_string()),
+        )
+        .unwrap_err();
+        assert_eq!(error, "ビルドのエラー");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     #[test]
     fn prepares_the_bin_source_with_warnings() {
         let root =
@@ -3483,28 +3903,106 @@ mod tests {
         let dir = root.join("pkg");
         let cargo = crate::toolchain::find_cargo().unwrap();
         let metadata = crate::toolchain::metadata_json(&cargo, &dir).unwrap();
-        let prepared = prepare(&root, &dir, &metadata, "a", "abc480_b").unwrap();
+        let prepared = prepare(
+            &root,
+            &dir,
+            &metadata,
+            "a",
+            "abc480_b",
+            &NO_RUST_LIBRARIES,
+            |_| Ok(()),
+        )
+        .unwrap();
         assert_eq!(prepared.file, "pkg/src/bin/a.rs");
         assert_eq!(prepared.source, "mod helper;\nfn main() {}\n");
         let warnings = prepared.warnings.join("\n");
         assert_eq!(prepared.warnings.len(), 4, "{warnings}");
-        assert!(warnings.contains("mod helper;"));
+        // helper.rs がないので展開せず、見つからないと知らせる（Phase 28。D-250）
+        assert!(warnings.contains("ファイルが見つからないモジュール（mod helper;）"));
         assert!(warnings.contains("proconio") && warnings.contains("0.4.5"));
         assert!(warnings.contains("mylib"));
         assert!(warnings.contains("bin「a」"));
+        // helper.rs を置くと展開し、その注意は消える。確認のダイアログに展開したモジュールを出す
+        std::fs::write(dir.join("src/bin/helper.rs"), "pub fn h() {}\n").unwrap();
+        let prepared = prepare(
+            &root,
+            &dir,
+            &metadata,
+            "a",
+            "abc480_b",
+            &NO_RUST_LIBRARIES,
+            |_| Ok(()),
+        )
+        .unwrap();
+        assert_eq!(prepared.expanded, ["src/bin/helper.rs"]);
+        assert_eq!(prepared.header_files, [dir.join("src/bin/helper.rs")]);
+        assert!(
+            prepared
+                .source
+                .starts_with("mod helper {\n// ---- 展開：src/bin/helper.rs ----\npub fn h() {}\n")
+        );
+        assert_eq!(prepared.warnings.len(), 3, "{:?}", prepared.warnings);
+        assert!(!prepared.warnings.join("\n").contains("mod helper;"));
+        let confirmation = Confirmation {
+            contest: "abc480".to_string(),
+            task: "abc480_b".to_string(),
+            task_title: "B".to_string(),
+            end_text: String::new(),
+            file: prepared.file.clone(),
+            size: prepared.source.len(),
+            language: "Rust (rustc 1.89.0)".to_string(),
+            user: None,
+            last_test: String::new(),
+            warnings: Vec::new(),
+            judge_note: "",
+            expanded: prepared.expanded.clone(),
+        };
+        assert!(
+            confirmation
+                .message()
+                .contains("展開したモジュール：src/bin/helper.rs")
+        );
+        std::fs::remove_file(dir.join("src/bin/helper.rs")).unwrap();
         // 上限を超えるコードは送らない
         std::fs::write(dir.join("src/bin/b.rs"), "/".repeat(SOURCE_LIMIT + 1)).unwrap();
         assert!(
-            prepare(&root, &dir, &metadata, "b", "abc480_b")
-                .unwrap_err()
-                .contains("512 KiB")
+            prepare(
+                &root,
+                &dir,
+                &metadata,
+                "b",
+                "abc480_b",
+                &NO_RUST_LIBRARIES,
+                |_| Ok(())
+            )
+            .unwrap_err()
+            .contains("512 KiB")
         );
-        assert!(prepare(&root, &dir, &metadata, "c", "abc480_c").is_err());
+        assert!(
+            prepare(
+                &root,
+                &dir,
+                &metadata,
+                "c",
+                "abc480_c",
+                &NO_RUST_LIBRARIES,
+                |_| Ok(())
+            )
+            .is_err()
+        );
         // ソースが作業領域の外にある（作業領域を mylib にしたとき）
         assert!(
-            prepare(&root.join("mylib"), &dir, &metadata, "a", "abc480_a")
-                .unwrap_err()
-                .contains("作業領域の外")
+            prepare(
+                &root.join("mylib"),
+                &dir,
+                &metadata,
+                "a",
+                "abc480_a",
+                &NO_RUST_LIBRARIES,
+                |_| Ok(())
+            )
+            .unwrap_err()
+            .contains("作業領域の外")
         );
         let _ = std::fs::remove_dir_all(&root);
     }

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-app-file-stamps"
+description = "Enables the app_file_stamps command without any pre-configured scope."
+commands.allow = ["app_file_stamps"]
+
+[[permission]]
+identifier = "deny-app-file-stamps"
+description = "Denies the app_file_stamps command without any pre-configured scope."
+commands.deny = ["app_file_stamps"]

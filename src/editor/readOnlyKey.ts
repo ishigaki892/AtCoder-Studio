@@ -4,3 +4,19 @@
 export function isReadOnlyKey(key: string): boolean {
   return key.startsWith("file://");
 }
+
+// アプリのフォルダのファイル（settings.json・言語のスニペットのファイル）のタブ（D-247）のキー。`app://` のあとにファイルの名前。
+// 作業領域の相対パスに `//` は入らないので、作業領域のファイルと取り違えない。読み書きは Rust 側の read_app_file など
+const APP_PREFIX = "app://";
+
+export function isAppKey(key: string): boolean {
+  return key.startsWith(APP_PREFIX);
+}
+
+export function appKey(name: string): string {
+  return APP_PREFIX + name;
+}
+
+export function appName(key: string): string {
+  return key.slice(APP_PREFIX.length);
+}

@@ -2712,6 +2712,20 @@ body.hide-breadcrumbs .breadcrumbs {
   line-height: 1.6;
 }
 
+/* 写して使う行（Rust のライブラリの依存の行。Phase 29。D-251）。選んでコピーできる */
+.settings-code {
+  margin: 0;
+  padding: 6px 8px;
+  overflow-x: auto;
+  font-family: var(--font-code);
+  font-size: 12px;
+  white-space: pre;
+  user-select: text;
+  background: var(--bg-toolbar);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+
 /* ペインの描画の失敗（Phase 10 作業 4。D-167） */
 .pane-error {
   display: flex;

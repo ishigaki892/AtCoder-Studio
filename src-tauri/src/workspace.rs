@@ -155,6 +155,12 @@ pub struct ReadResult {
 // UTF-8 として読めないファイルと、上限を超えるファイルは拒否する（D-068）
 pub fn read_text(root: &Path, relative: &str) -> Result<ReadResult, String> {
     let file = resolve(root, relative).map_err(|error| error.to_string())?;
+    read_text_at(&file)
+}
+
+// 場所を確かめ済みのファイルを読む（read_text と、アプリのフォルダのファイル〔D-247〕で使う）
+pub fn read_text_at(file: &Path) -> Result<ReadResult, String> {
+    let file = file.to_path_buf();
     if !file.is_file() {
         return Err("ファイルではありません".to_string());
     }
@@ -191,6 +197,16 @@ pub fn write_existing(
     expected: Option<&Stamp>,
 ) -> Result<WriteResult, String> {
     let file = resolve(root, relative).map_err(|error| error.to_string())?;
+    write_existing_at(&file, content, expected)
+}
+
+// 場所を確かめ済みの既存のファイルに書く（write_existing と、アプリのフォルダのファイル〔D-247〕で使う）
+pub fn write_existing_at(
+    file: &Path,
+    content: &str,
+    expected: Option<&Stamp>,
+) -> Result<WriteResult, String> {
+    let file = file.to_path_buf();
     if !file.is_file() {
         return Err("ファイルではありません".to_string());
     }

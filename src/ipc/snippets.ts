@@ -19,11 +19,6 @@ export function reloadSnippets(force: boolean, language: Language): Promise<Load
   return invoke<LoadedSnippets | null>("reload_snippets", { force, language });
 }
 
-// 言語のファイルを既定のテキストエディタで開く（なければ空のものを作る。Phase 13 作業 2。D-187）
-export function openSnippetsFile(language: Language): Promise<void> {
-  return invoke("open_snippets_file", { language });
-}
-
 // VS Code の言語のスニペット（rust.json・cpp.json・python.json）を言語のファイルに写した結果。backup は前のファイルを退避したファイルの名前
 export type ImportedSnippets = { cancelled: boolean; count: number; problems: number; backup: string | null };
 

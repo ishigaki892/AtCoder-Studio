@@ -4,7 +4,16 @@ import { useEffect, useMemo, useState } from "react";
 import { COLOR_GROUPS, defaultColor, joinColor, splitColor } from "../appearance";
 import { snippetsFile, type LoadedSnippets } from "../ipc/snippets";
 import type { Language } from "../ipc/workspace";
-import { openTemplatesFolder, templateFiles, type TemplateFiles } from "../ipc/scaffold";
+import {
+  openLibraryFolder,
+  openRustLibraryFolder,
+  openPythonLibraryFolder,
+  openTemplatesFolder,
+  rustLibraryLines,
+  templateFiles,
+  type RustLibraryLines,
+  type TemplateFiles,
+} from "../ipc/scaffold";
 import {
   COMMAND_LABELS,
   COMMANDS,
@@ -275,10 +284,14 @@ export function SnippetsSection({
 // Finder から戻ったときに、あるかどうかを確かめ直す
 export function TemplatesSection({ onError }: { onError: (message: string) => void }) {
   const [files, setFiles] = useState<TemplateFiles | null>(null);
+  const [rust, setRust] = useState<RustLibraryLines | null>(null);
   useEffect(() => {
     const refresh = () => {
       templateFiles()
         .then(setFiles)
+        .catch((e) => onError(String(e)));
+      rustLibraryLines()
+        .then(setRust)
         .catch((e) => onError(String(e)));
     };
     refresh();
@@ -326,6 +339,53 @@ export function TemplatesSection({ onError }: { onError: (message: string) => vo
           </tr>
         </tbody>
       </table>
+      {/* 自作の C++ のライブラリ（Phase 27。D-248） */}
+      <div className="settings-actions-row">
+        <span className="settings-name">libraries/cpp/</span>
+        <button
+          type="button"
+          className="settings-link"
+          onClick={() => openLibraryFolder().catch((e) => onError(String(e)))}
+        >
+          ライブラリのフォルダを開く
+        </button>
+      </div>
+      <p className="settings-note">
+        C++ の自作のライブラリ（ヘッダー）を置きます（フォルダがなければ、開くときに作ります）。main.cpp に #include "segtree.hpp" のように書くと、手元のビルドではこのフォルダから読み、提出と「コードをコピー」のときに中身を展開して 1 つのファイルにします。main.cpp の隣のヘッダーも同じく展開します（隣のものが先）。
+      </p>
+      {/* 自作の Rust のライブラリのクレート（Phase 29。D-251） */}
+      <div className="settings-actions-row">
+        <span className="settings-name">libraries/rust/</span>
+        <button
+          type="button"
+          className="settings-link"
+          onClick={() => openRustLibraryFolder().catch((e) => onError(String(e)))}
+        >
+          ライブラリのフォルダを開く（Rust）
+        </button>
+      </div>
+      <p className="settings-note">
+        Rust の自作のライブラリのクレートを置きます（このフォルダで cargo new --lib mylib のように作ります）。問題の Cargo.toml の [dependencies] に次の行を書くと（templates/dependencies.toml に書けば、作る問題すべてに入ります）、手元では依存として読み、提出と「コードをコピー」のときに mod として main.rs に入れて 1 つのファイルにします。
+      </p>
+      {rust && rust.lines.length > 0 ? (
+        <pre className="settings-code">{rust.lines.join("\n")}</pre>
+      ) : (
+        <p className="settings-note">（まだクレートがありません。{rust?.dir ?? "libraries/rust/"} に作ると、ここに写して使う行が出ます）</p>
+      )}
+      {/* 自作の Python のモジュール（Phase 30。D-252） */}
+      <div className="settings-actions-row">
+        <span className="settings-name">libraries/python/</span>
+        <button
+          type="button"
+          className="settings-link"
+          onClick={() => openPythonLibraryFolder().catch((e) => onError(String(e)))}
+        >
+          ライブラリのフォルダを開く（Python）
+        </button>
+      </div>
+      <p className="settings-note">
+        Python の自作のモジュール（mylib.py や、__init__.py のあるパッケージのフォルダ）を置きます（フォルダがなければ、開くときに作ります）。main.py に from mylib import f のように書くと、手元の実行・テスト・デバッグではこのフォルダから読み、提出と「コードをコピー」のときに中身を main.py に埋め込んで 1 つのファイルにします。main.py の隣のモジュールも同じく埋め込みます（隣のものが先）。
+      </p>
     </div>
   );
 }

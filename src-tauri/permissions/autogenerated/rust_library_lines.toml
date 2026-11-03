@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-rust-library-lines"
+description = "Enables the rust_library_lines command without any pre-configured scope."
+commands.allow = ["rust_library_lines"]
+
+[[permission]]
+identifier = "deny-rust-library-lines"
+description = "Denies the rust_library_lines command without any pre-configured scope."
+commands.deny = ["rust_library_lines"]

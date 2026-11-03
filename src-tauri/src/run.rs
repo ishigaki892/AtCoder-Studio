@@ -726,6 +726,10 @@ fn prepare_cpp<T>(
         info(channel, "ローカルの GCC の版がジャッジと異なります。\n");
     }
     info(channel, format!("{}\n", cpp::NOT_LIKE_JUDGE));
+    // 自作のライブラリ（D-248）。あるときだけ出す（提出・コピーのときに展開する）
+    if let Some(dir) = &settings.library {
+        info(channel, format!("自作のライブラリ：{}\n", dir.display()));
+    }
     // AC Library（D-206）
     match &settings.ac_library {
         Some(dir) => info(channel, format!("AC Library：{}\n", dir.display())),
@@ -831,11 +835,14 @@ fn prepare_python<T>(
             cancel,
             channel,
         )?;
-        built_examples.push((name, python::program(&interpreter, &source)));
+        built_examples.push((
+            name,
+            python::program(&interpreter, &source, settings.library.as_deref()),
+        ));
     }
     Ok((
         Prepared {
-            executable: python::program(&interpreter, python::SOURCE),
+            executable: python::program(&interpreter, python::SOURCE, settings.library.as_deref()),
             bins,
             examples: built_examples,
         },
@@ -978,6 +985,8 @@ fn build_cpp(
 pub(crate) struct Program {
     pub path: PathBuf,
     pub args: Vec<OsString>,
+    // Python の処理系で動かすときの環境（D-252）。ほかの言語は None
+    pub python: Option<python::PythonEnv>,
 }
 
 impl Program {
@@ -986,12 +995,16 @@ impl Program {
         Program {
             path,
             args: Vec::new(),
+            python: None,
         }
     }
 
     pub(crate) fn command(&self) -> Command {
         let mut command = Command::new(&self.path);
         command.args(&self.args);
+        if let Some(env) = &self.python {
+            env.apply(&mut command);
+        }
         command
     }
 }

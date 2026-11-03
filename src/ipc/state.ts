@@ -187,11 +187,6 @@ export function saveSettings(
   });
 }
 
-// settings.json を既定のテキストエディタで開く（D-159）
-export function openSettingsFile(): Promise<void> {
-  return invoke<void>("open_settings_file");
-}
-
 export function saveAppState(
   layout: Layout,
   tabs: string[],

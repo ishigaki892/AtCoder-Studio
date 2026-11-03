@@ -1,6 +1,7 @@
 import type { WheelEvent } from "react";
 import FileIcon from "../sidebar/FileIcon";
 import type { Tab } from "./useTabs";
+import { appName, isAppKey } from "./readOnlyKey";
 
 // ファイルでないタブ（Phase 24 の「過去問」〔D-242〕・Phase 26 の「設定」〔D-246〕）。ファイルのタブの後ろに出す
 export type ExtraTab = {
@@ -54,8 +55,14 @@ function label(tab: Tab, tabs: Tab[]) {
   if (tab.readOnly) {
     return { name: decodeName(baseName(tab.path)), folder: null };
   }
+  // アプリのフォルダのファイル（D-247）：作業領域に同じ名前のファイルのタブがあれば「アプリのフォルダ」を添える
+  if (isAppKey(tab.path)) {
+    const name = appName(tab.path);
+    const same = tabs.some((t) => t !== tab && !t.readOnly && !isAppKey(t.path) && baseName(t.path) === name);
+    return { name, folder: same ? "アプリのフォルダ" : null };
+  }
   const name = baseName(tab.path);
-  const others = tabs.filter((t) => t !== tab && !t.readOnly && baseName(t.path) === name);
+  const others = tabs.filter((t) => t !== tab && !t.readOnly && !isAppKey(t.path) && baseName(t.path) === name);
   if (others.length === 0) {
     return { name, folder: null };
   }
@@ -90,7 +97,7 @@ function TabBar({ tabs, activePath, extras, onSelect, onClose }: Props) {
             className={`tab ${active ? "active" : ""}`}
             role="tab"
             aria-selected={active}
-            title={tab.readOnly ? tab.readOnly.location : tab.path}
+            title={tab.readOnly ? tab.readOnly.location : isAppKey(tab.path) ? `アプリのフォルダの ${appName(tab.path)}` : tab.path}
             onClick={() => onSelect(tab.path)}
           >
             <FileIcon name={name} isDir={false} open={false} />

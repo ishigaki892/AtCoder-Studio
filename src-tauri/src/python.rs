@@ -120,6 +120,9 @@ pub struct PythonSettings {
     pub interpreter: Interpreter,
     pub cpython: String,
     pub pypy: String,
+    // 自作のライブラリのフォルダ（アプリのフォルダの libraries/python/。あれば IDE が入れる。D-252）
+    #[serde(skip)]
+    pub library: Option<PathBuf>,
 }
 
 impl PythonSettings {
@@ -355,49 +358,6 @@ const PYPY_PACKAGES: &[&str] = &[
     "z3",
 ];
 
-// ソースが import するモジュールの一番上の名前を、処理系の ast で読む（文字列・コメントの中は数えない）。
-// 1 行に「名前<TAB>標準ライブラリなら 1」。相対の import（from . import x）は名前を「.」にする
-const IMPORTS: &str = "import ast, sys\ntree = ast.parse(open(sys.argv[1], 'rb').read())\nnames = set()\nfor node in ast.walk(tree):\n    if isinstance(node, ast.Import):\n        names.update(a.name.split('.')[0] for a in node.names)\n    elif isinstance(node, ast.ImportFrom):\n        names.add('.' if node.level else node.module.split('.')[0])\nstd = set(sys.stdlib_module_names) | set(sys.builtin_module_names)\nfor n in sorted(names):\n    print(n, int(n in std), sep='\\t')\n";
-
-// import する名前と、標準ライブラリか
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Import {
-    pub name: String,
-    pub standard: bool,
-}
-
-// main.py の import を読む（提出の前の検査。D-224）。パッケージのフォルダで動かし、-I で、そのフォルダの
-// モジュール（ast.py など）を読ませない
-pub fn imports(interpreter: &Path, source: &Path) -> Result<Vec<Import>, String> {
-    let mut command = Command::new(interpreter);
-    if let Some(dir) = source.parent() {
-        command.current_dir(dir);
-    }
-    command
-        .arg("-I")
-        .arg("-B")
-        .arg("-c")
-        .arg(IMPORTS)
-        .arg(source);
-    crate::toolchain::clear_ide_env(&mut command);
-    let output = command
-        .output()
-        .map_err(|error| format!("{} を起動できません：{error}", interpreter.display()))?;
-    if !output.status.success() {
-        return Err("import を読めません（構文の誤りがあるかもしれません）".to_string());
-    }
-    Ok(String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter_map(|line| {
-            let (name, standard) = line.split_once('\t')?;
-            Some(Import {
-                name: name.to_string(),
-                standard: standard.trim() == "1",
-            })
-        })
-        .collect())
-}
-
 // 処理系の標準ライブラリ・site-packages の場所（定義ジャンプの行き先を読み取り専用で開く。D-225）。
 // -I で、今のフォルダ・利用者の site-packages・PYTHON… の環境変数を入れない。読めなければ空
 pub fn library_dirs(interpreter: &Path) -> Vec<PathBuf> {
@@ -422,39 +382,40 @@ pub fn library_dirs(interpreter: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
-// 提出の前の検査の注意（D-224。止めずに確認のダイアログに出す）。dir はパッケージのディレクトリ
-pub fn submit_warnings(interpreter: Interpreter, imports: &[Import], dir: &Path) -> Vec<String> {
+// 提出の前の検査の注意（D-224・D-252。止めずに確認のダイアログに出す）。found は main.py から import をたどった結果、
+// package_dir は main.py のフォルダ、library は libraries/python/（見せ方に使う）
+pub fn submit_warnings(
+    interpreter: Interpreter,
+    found: &crate::py_bundle::Found,
+    package_dir: &Path,
+    library: Option<&Path>,
+) -> Vec<String> {
     let mut warnings = Vec::new();
-    let is_local = |name: &str| {
-        name == "." || dir.join(format!("{name}.py")).is_file() || dir.join(name).is_dir()
-    };
-    let local: Vec<&str> = imports
-        .iter()
-        .filter(|import| !import.standard && is_local(&import.name))
-        .map(|import| import.name.as_str())
-        .collect();
-    if !local.is_empty() {
+    if found.relative {
+        warnings.push(
+            "main.py の中の相対 import（from . import …）は展開できません。ジャッジには、このファイルだけが置かれます"
+                .to_string(),
+        );
+    }
+    if !found.shadows.is_empty() {
         warnings.push(format!(
-            "自分のモジュールを読む import（{}）があります。ジャッジには、このファイルだけが置かれます",
-            local
+            "標準ライブラリと同じ名前のモジュール（{}）は入れていません。ジャッジでは標準ライブラリのほうが読まれます",
+            found
+                .shadows
                 .iter()
-                .map(|name| if *name == "." {
-                    "from . import".to_string()
-                } else {
-                    (*name).to_string()
-                })
+                .map(|(name, path)| format!(
+                    "{name}：{}",
+                    crate::py_bundle::shown(path, package_dir, library)
+                ))
                 .collect::<Vec<_>>()
                 .join("、")
         ));
     }
-    let missing: Vec<&str> = imports
+    let missing: Vec<&str> = found
+        .others
         .iter()
-        .filter(|import| {
-            !import.standard
-                && !is_local(&import.name)
-                && !interpreter.judge_packages().contains(&import.name.as_str())
-        })
-        .map(|import| import.name.as_str())
+        .map(String::as_str)
+        .filter(|name| !interpreter.judge_packages().contains(name))
         .collect();
     if !missing.is_empty() {
         warnings.push(format!(
@@ -481,15 +442,39 @@ pub fn version_warning(interpreter: Interpreter, version: &Version) -> Option<St
     })
 }
 
-// 動かす命令（パッケージのディレクトリで、script は相対パス）。-E で PYTHON… の環境変数を読ませず、
+// 処理系で動かすときの環境（D-252）：利用者の環境の PYTHON… の変数を外し（-E の代わり）、
+// 自作のライブラリのフォルダ（libraries/python/）があれば PYTHONPATH に渡す。
+// sys.path は main.py のフォルダ → libraries/python/ → 標準ライブラリの順になる
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PythonEnv {
+    pub library: Option<PathBuf>,
+}
+
+impl PythonEnv {
+    pub fn apply(&self, command: &mut Command) {
+        for (name, _) in std::env::vars_os() {
+            if name.to_str().is_some_and(|name| name.starts_with("PYTHON")) {
+                command.env_remove(&name);
+            }
+        }
+        if let Some(library) = &self.library {
+            command.env("PYTHONPATH", library);
+        }
+    }
+}
+
+// 動かす命令（パッケージのディレクトリで、script は相対パス）。環境は PythonEnv（D-252）、
 // -B で __pycache__ を作らない。-X int_max_str_digits=0 はジャッジと同じ
-pub fn program(interpreter: &Path, script: &str) -> Program {
+pub fn program(interpreter: &Path, script: &str, library: Option<&Path>) -> Program {
     Program {
         path: interpreter.to_path_buf(),
-        args: ["-E", "-B", "-X", "int_max_str_digits=0", script]
+        args: ["-B", "-X", "int_max_str_digits=0", script]
             .iter()
             .map(OsString::from)
             .collect(),
+        python: Some(PythonEnv {
+            library: library.map(Path::to_path_buf),
+        }),
     }
 }
 
@@ -687,16 +672,66 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    // 本物の処理系で、main.py のフォルダ → libraries/python/ → 標準ライブラリの順に読むこと（D-252）。処理系がなければ飛ばす
+    #[test]
+    fn runs_with_the_library_on_the_path() {
+        let Ok(interpreter) = find_interpreter(&PythonSettings::default()) else {
+            eprintln!("python3.13 がないので飛ばします");
+            return;
+        };
+        let base =
+            std::env::temp_dir().join(format!("atcoder-studio-python-path-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let package = base.join("a");
+        let library = base.join("libraries/python");
+        std::fs::create_dir_all(&package).unwrap();
+        std::fs::create_dir_all(&library).unwrap();
+        std::fs::write(
+            package.join("main.py"),
+            "import mylib, util, sys\nprint(mylib.NAME, util.NAME, sys.flags.ignore_environment)\n",
+        )
+        .unwrap();
+        std::fs::write(package.join("util.py"), "NAME = 'near'\n").unwrap();
+        std::fs::write(library.join("util.py"), "NAME = 'library'\n").unwrap();
+        std::fs::write(library.join("mylib.py"), "NAME = 'mylib'\n").unwrap();
+        let mut command = program(&interpreter, "main.py", Some(&library)).command();
+        command.current_dir(&package);
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "mylib near 0\n");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     #[test]
     fn builds_the_run_command() {
-        let program = program(Path::new("/opt/homebrew/bin/python3.13"), "main.py");
+        let program = program(
+            Path::new("/opt/homebrew/bin/python3.13"),
+            "main.py",
+            Some(Path::new("/app/libraries/python")),
+        );
         assert_eq!(program.path, PathBuf::from("/opt/homebrew/bin/python3.13"));
         assert_eq!(
             program.args,
-            ["-E", "-B", "-X", "int_max_str_digits=0", "main.py"]
+            ["-B", "-X", "int_max_str_digits=0", "main.py"]
                 .map(OsString::from)
                 .to_vec()
         );
+        // PYTHON… の変数を外し、PYTHONPATH に libraries/python/ を渡す（D-252）
+        let command = program.command();
+        let envs: Vec<_> = command.get_envs().collect();
+        assert!(envs.contains(&(
+            std::ffi::OsStr::new("PYTHONPATH"),
+            Some(std::ffi::OsStr::new("/app/libraries/python"))
+        )));
+        for (name, value) in envs {
+            if name != "PYTHONPATH" {
+                assert!(!name.to_string_lossy().starts_with("PYTHON") || value.is_none());
+            }
+        }
     }
 
     #[test]
@@ -746,45 +781,43 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    // 提出の前の検査（Phase 19 作業 4。D-224）
+    // 提出の前の検査（Phase 19 作業 4。D-224・D-252）
     #[test]
     fn warns_before_submit() {
-        let dir = temp_dir("warnings");
-        std::fs::write(dir.join("lib.py"), "").unwrap();
-        std::fs::create_dir_all(dir.join("pkg")).unwrap();
-        let import = |name: &str, standard: bool| Import {
-            name: name.to_string(),
-            standard,
+        let found = crate::py_bundle::Found {
+            others: vec![
+                "numba".to_string(),
+                "numpy".to_string(),
+                "requests".to_string(),
+            ],
+            shadows: vec![(
+                "heapq".to_string(),
+                PathBuf::from("/app/libraries/python/heapq.py"),
+            )],
+            relative: true,
+            ..Default::default()
         };
-        let imports = [
-            import(".", false),
-            import("collections", true),
-            import("lib", false),
-            import("numba", false),
-            import("numpy", false),
-            import("pkg", false),
-            import("requests", false),
-            import("sys", true),
-        ];
+        let package = Path::new("/ws/a");
+        let library = Some(Path::new("/app/libraries/python"));
         assert_eq!(
-            submit_warnings(Interpreter::Cpython, &imports, &dir),
+            submit_warnings(Interpreter::Cpython, &found, package, library),
             [
-                "自分のモジュールを読む import（from . import、lib、pkg）があります。ジャッジには、このファイルだけが置かれます",
+                "main.py の中の相対 import（from . import …）は展開できません。ジャッジには、このファイルだけが置かれます",
+                "標準ライブラリと同じ名前のモジュール（heapq：libraries/python/heapq.py）は入れていません。ジャッジでは標準ライブラリのほうが読まれます",
                 "ジャッジの CPython の言語の一覧にないパッケージ（requests）を import しています",
             ]
         );
         // PyPy のジャッジには numba がない
         assert_eq!(
-            submit_warnings(Interpreter::Pypy, &imports, &dir)[1],
+            submit_warnings(Interpreter::Pypy, &found, package, library)[2],
             "ジャッジの PyPy の言語の一覧にないパッケージ（numba、requests）を import しています"
         );
-        // 標準ライブラリとジャッジのパッケージだけなら、注意はない
-        let plain = [
-            import("sys", true),
-            import("sortedcontainers", false),
-            import("atcoder", false),
-        ];
-        assert!(submit_warnings(Interpreter::Pypy, &plain, &dir).is_empty());
+        // ジャッジのパッケージだけなら、注意はない
+        let plain = crate::py_bundle::Found {
+            others: vec!["sortedcontainers".to_string(), "atcoder".to_string()],
+            ..Default::default()
+        };
+        assert!(submit_warnings(Interpreter::Pypy, &plain, package, library).is_empty());
         // 版
         let cpython = parse_version("Python 3.13.7\n").unwrap();
         assert_eq!(version_warning(Interpreter::Cpython, &cpython), None);
@@ -799,10 +832,9 @@ mod tests {
             version_warning(Interpreter::Pypy, &pypy).as_deref(),
             Some("手元の PyPy（8.0.1）は、ジャッジ（7.3.20）と版が違います")
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
-    // 手元の処理系で import を読む（入っているものだけ）。文字列・コメントの中は数えない
+    // 手元の処理系で import をたどる（入っているものだけ。D-252）。文字列・コメントの中は数えない
     #[test]
     fn reads_imports_with_local_python() {
         let dir = temp_dir("imports");
@@ -811,9 +843,8 @@ mod tests {
             "import sys, os.path as p\nfrom collections import deque\nimport numpy as np\nfrom .lib import y\ns = \"import fake\"\n# import fake2\ndef f():\n    from numba import njit\n",
         )
         .unwrap();
-        // 同じフォルダの ast.py は読ませない（-I）
+        // 同じフォルダの ast.py は、たどる命令に読ませない（-I）。main.py は ast を import しないので、注意にも出ない
         std::fs::write(dir.join("ast.py"), "raise SystemExit(3)\n").unwrap();
-        let mut tried = 0;
         for interpreter in [Interpreter::Cpython, Interpreter::Pypy] {
             let settings = PythonSettings {
                 interpreter,
@@ -823,37 +854,17 @@ mod tests {
                 eprintln!("{} がないので飛ばします", interpreter.label());
                 continue;
             };
-            tried += 1;
-            let names: Vec<(String, bool)> = imports(&found, &dir.join("main.py"))
-                .unwrap()
-                .into_iter()
-                .map(|import| (import.name, import.standard))
-                .collect();
-            let expected: Vec<(String, bool)> = [
-                (".", false),
-                ("collections", true),
-                ("numba", false),
-                ("numpy", false),
-                ("os", true),
-                ("sys", true),
-            ]
-            .iter()
-            .map(|(name, standard)| (name.to_string(), *standard))
-            .collect();
-            assert_eq!(names, expected, "{}", interpreter.label());
-        }
-        // 構文の誤りでは読めない
-        if tried > 0 {
-            std::fs::write(dir.join("main.py"), "if True\n").unwrap();
-            let found = find_interpreter(&PythonSettings::default())
-                .or_else(|_| {
-                    find_interpreter(&PythonSettings {
-                        interpreter: Interpreter::Pypy,
-                        ..PythonSettings::default()
-                    })
-                })
-                .unwrap();
-            assert!(imports(&found, &dir.join("main.py")).is_err());
+            let result = crate::py_bundle::find(&found, &dir.join("main.py"), &dir, None).unwrap();
+            assert_eq!(result.others, ["numpy", "numba"], "{}", interpreter.label());
+            assert!(result.relative);
+            assert!(result.modules.is_empty());
+            assert!(result.shadows.is_empty());
+            // 構文の誤りでは読めない
+            std::fs::write(dir.join("broken.py"), "if True\n").unwrap();
+            assert!(matches!(
+                crate::py_bundle::find(&found, &dir.join("broken.py"), &dir, None),
+                Err(crate::py_bundle::FindError::Unreadable(_))
+            ));
         }
         assert!(!dir.join("__pycache__").exists());
         let _ = std::fs::remove_dir_all(&dir);

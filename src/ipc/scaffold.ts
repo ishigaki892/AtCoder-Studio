@@ -105,3 +105,33 @@ export function templateFiles(): Promise<TemplateFiles> {
 export function openTemplatesFolder(): Promise<void> {
   return invoke("open_templates_folder");
 }
+
+// 自作の C++ のライブラリのフォルダ（libraries/cpp/）を Finder で開く（なければ空のフォルダを作る。D-248）
+export function openLibraryFolder(): Promise<void> {
+  return invoke("open_library_folder");
+}
+
+// 自作の Rust のライブラリのフォルダ（libraries/rust/）を Finder で開く（なければ空のフォルダを作る。D-251）
+export function openRustLibraryFolder(): Promise<void> {
+  return invoke("open_rust_library_folder");
+}
+
+// 自作の Python のライブラリのフォルダ（libraries/python/）を Finder で開く（なければ空のフォルダを作る。D-252）
+export function openPythonLibraryFolder(): Promise<void> {
+  return invoke("open_python_library_folder");
+}
+
+// 自作の Rust のライブラリを問題から読む、写して使う依存の行（D-251）。dir は libraries/rust/ の場所
+export type RustLibraryLines = { dir: string; lines: string[] };
+
+export function rustLibraryLines(): Promise<RustLibraryLines> {
+  return invoke<RustLibraryLines>("rust_library_lines");
+}
+
+// 「コードをコピー」でコピーする中身。C++ なら `#include "…"` を展開したもの（D-248）。
+// expanded は展開したヘッダー、missing は見つからなかったもの
+export type CopySource = { content: string; expanded: string[]; missing: string[] };
+
+export function copySource(path: string): Promise<CopySource> {
+  return invoke<CopySource>("copy_source", { path });
+}

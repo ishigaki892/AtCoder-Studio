@@ -9,6 +9,7 @@ import { QUIESCENT_EVENT } from "./inlayHints";
 import { isCppPath } from "./language";
 import { activeEditorTarget, moveCursorTo } from "./Editor";
 import type { Tab } from "./useTabs";
+import { appName, isAppKey } from "./readOnlyKey";
 
 type Props = {
   tab: Tab | null;
@@ -186,9 +187,11 @@ function Breadcrumbs({ tab, onOpenFile }: Props) {
     return null;
   }
   const path = tab.path;
+  // アプリのフォルダのファイル（D-247）は、作業領域のフォルダを辿れないので、読み取り専用のタブと同じく名前だけを出す
+  const app = isAppKey(path);
   const parts = path.split("/");
-  const file = tab.readOnly ? decodeName(parts[parts.length - 1]) : parts[parts.length - 1];
-  const folders = tab.readOnly ? [] : parts.slice(0, -1);
+  const file = app ? appName(path) : tab.readOnly ? decodeName(parts[parts.length - 1]) : parts[parts.length - 1];
+  const folders = tab.readOnly || app ? [] : parts.slice(0, -1);
 
   let outline: OutlineNode[] = [];
   if (cursor && cursor.key === path && !tab.readOnly) {
@@ -284,7 +287,13 @@ function Breadcrumbs({ tab, onOpenFile }: Props) {
             </Fragment>
           );
         })}
-        {tab.readOnly ? (
+        {app && (
+          <>
+            <span className="breadcrumb">アプリのフォルダ</span>
+            {separator}
+          </>
+        )}
+        {tab.readOnly || app ? (
           <span className="breadcrumb breadcrumb-file">
             <FileIcon name={file} isDir={false} open={false} />
             {file}

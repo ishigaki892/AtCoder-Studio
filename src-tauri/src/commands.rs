@@ -10,6 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Manager, State};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 
+use crate::app_files;
 use crate::cpp::{self, CppSettings};
 use crate::debug::{
     self, BreakpointView, DebugControl, EvaluateContext, EvaluateView, FrameView, ScopeView,
@@ -962,11 +963,12 @@ pub async fn debug_evaluate(
     .await
 }
 
-// C++ のコンパイラの設定（D-205）と AC Library の場所（D-206）。読めないときは既定（g++ を探す）
+// C++ のコンパイラの設定（D-205）と AC Library（D-206）・自作のライブラリ（D-248）の場所。読めないときは既定（g++ を探す）
 fn cpp_settings_of(app: &AppHandle) -> CppSettings {
     app_dir(app)
         .map(|dir| CppSettings {
             ac_library: cpp::ac_library_dir(&dir),
+            library: cpp::library_dir(&dir),
             ..storage::cpp_settings(&dir)
         })
         .unwrap_or_default()
@@ -977,7 +979,10 @@ fn lang_settings_of(app: &AppHandle) -> LangSettings {
     LangSettings {
         cpp: cpp_settings_of(app),
         python: app_dir(app)
-            .map(|dir| storage::python_settings(&dir))
+            .map(|dir| PythonSettings {
+                library: crate::py_bundle::library_dir(&dir),
+                ..storage::python_settings(&dir)
+            })
             .unwrap_or_default(),
     }
 }
@@ -1035,7 +1040,12 @@ pub async fn lsp_start(
             };
             let (dir, projects) = lsp::basedpyright_place(&root, package);
             let interpreter = crate::python::find_interpreter(&python).ok();
-            lsp::basedpyright(dir, projects, interpreter.as_deref())?
+            lsp::basedpyright(
+                dir,
+                projects,
+                interpreter.as_deref(),
+                python.library.as_deref(),
+            )?
         } else {
             return Ok(None);
         };
@@ -1084,10 +1094,12 @@ pub async fn read_source(uri: String, app: AppHandle) -> Result<ReadOnlySource, 
     let python = lang_settings_of(&app).python;
     tauri::async_runtime::spawn_blocking(move || {
         let cpp_roots = cpp::find_compiler(&cpp)
-            .map(|compiler| cpp::header_dirs(&compiler, cpp.ac_library.as_deref()))
+            .map(|compiler| cpp::header_dirs(&compiler, &cpp.include_dirs()))
             .unwrap_or_default();
         // Python：basedpyright の typeshed と、設定の処理系の標準ライブラリ・site-packages（D-225）
         let mut python_roots: Vec<PathBuf> = lsp::basedpyright_typeshed().into_iter().collect();
+        // 自作のライブラリ（libraries/python/。D-252）
+        python_roots.extend(python.library.clone());
         if let Ok(interpreter) = crate::python::find_interpreter(&python) {
             python_roots.extend(crate::python::library_dirs(&interpreter));
         }
@@ -1314,10 +1326,13 @@ pub async fn atcoder_submit(
         return Err("別の処理を実行中です".to_string());
     }
     let dir = package_dir(&root, &target)?;
-    // C++ のコンパイラの設定（版の注意に使う。D-209）
-    let cpp_settings = storage::cpp_settings(&app_dir(&app)?);
-    // Python の処理系の設定（提出の言語と、import・版の注意に使う。D-224）
-    let python_settings = storage::python_settings(&app_dir(&app)?);
+    // C++ のコンパイラの設定（版の注意に使う。D-209）と、展開に使う自作のライブラリ・AC Library の場所（D-248）。
+    // storage::cpp_settings はコンパイラの欄だけなので、場所も入る cpp_settings_of を使う（Phase 29 のときに直した）
+    let cpp_settings = cpp_settings_of(&app);
+    // 自作の Rust のライブラリの場所（Phase 29。D-251）
+    let rust_libraries = crate::rust_bundle::library_dir(&app_dir(&app)?);
+    // Python の処理系の設定（提出の言語と、import・版の注意に使う。D-224）と、自作のモジュールの場所（D-252）
+    let python_settings = lang_settings_of(&app).python;
     // 実行履歴に残す先。UTF-8 で表せないパスの作業領域は、記録しない（record_history と同じ）
     let place = root.to_str().and_then(|workspace| {
         ensure_primary(&app).ok()?;
@@ -1337,18 +1352,56 @@ pub async fn atcoder_submit(
                 let cargo =
                     toolchain::find_cargo().ok_or_else(|| "cargo が見つかりません".to_string())?;
                 let metadata = toolchain::metadata_json(&cargo, &dir)?;
+                let read_metadata = |library: &Path| toolchain::metadata_json(&cargo, library);
+                let libraries = submit::RustLibraries {
+                    root: rust_libraries.as_deref(),
+                    read_metadata: &read_metadata,
+                };
                 (
-                    submit::prepare(&root, &dir, &metadata, &target.bin, &id.task)?,
+                    submit::prepare(
+                        &root,
+                        &dir,
+                        &metadata,
+                        &target.bin,
+                        &id.task,
+                        &libraries,
+                        // 展開したものを、作業用のパッケージでビルドして確かめる（D-250・D-251）
+                        |check| {
+                            crate::rust_check::check(
+                                &cargo,
+                                check.metadata,
+                                check.package,
+                                check.source,
+                                check.bundled,
+                                check.extra,
+                            )
+                        },
+                    )?,
                     toolchain::bin_names(&metadata, &dir)?,
                 )
             }
             Language::Cpp => {
-                let version = cpp::find_compiler(&cpp_settings)
-                    .and_then(|compiler| cpp::version(&compiler))
+                let compiler = cpp::find_compiler(&cpp_settings);
+                let version = compiler
+                    .as_ref()
                     .ok()
+                    .and_then(|compiler| cpp::version(compiler).ok())
                     .map(|(_, number)| number);
+                // 展開するヘッダーを探す場所（D-248）。文法の確かめには、ジャッジにある AC Library だけを渡す
+                let dirs = crate::cpp_expand::SearchDirs {
+                    library: cpp_settings.library.as_deref(),
+                    ac_library: cpp_settings.ac_library.as_deref(),
+                };
+                let acl: Vec<PathBuf> = cpp_settings.ac_library.iter().cloned().collect();
                 (
-                    submit::prepare_cpp(&root, &dir, version.as_deref())?,
+                    submit::prepare_cpp(&root, &dir, version.as_deref(), &dirs, |source| {
+                        let compiler = compiler.as_ref().map_err(|error| {
+                            format!(
+                                "ヘッダーを展開したコードを確かめられないので送りません：{error}"
+                            )
+                        })?;
+                        cpp::check_syntax(compiler, source, &acl)
+                    })?,
                     vec![cpp::BIN.to_string()],
                 )
             }
@@ -1602,7 +1655,11 @@ fn template_for(dir: &Path) -> Result<scaffold::Template, String> {
         main_loop: settings.main_loop,
     });
     if language == Language::Cpp {
-        template.compile_flags = cpp::compile_flags(cpp::ac_library_dir(dir).as_deref());
+        let includes: Vec<PathBuf> = [cpp::library_dir(dir), cpp::ac_library_dir(dir)]
+            .into_iter()
+            .flatten()
+            .collect();
+        template.compile_flags = cpp::compile_flags(&includes);
     }
     Ok(template)
 }
@@ -1865,22 +1922,201 @@ pub fn open_templates_folder(app: AppHandle) -> Result<(), String> {
     }
 }
 
-// 言語のスニペットのファイルを既定のテキストエディタで開く（Phase 13 作業 2。D-187）。なければ空のもの（{ }）を作る。
-// 書き換えて IDE の窓に戻ると読み直す
+// 自作の C++ のライブラリのフォルダ（アプリのフォルダの libraries/cpp/）を Finder で開く。なければ空のフォルダを作る（D-248）
 #[tauri::command]
-pub fn open_snippets_file(language: Language, app: AppHandle) -> Result<(), String> {
-    let path = snippets::ensure_file(&app_dir(&app)?, language)?;
-    let name = snippets::file_name(language);
+pub fn open_library_folder(app: AppHandle) -> Result<(), String> {
+    let dir = cpp::ensure_library_dir(&app_dir(&app)?)?;
     let status = std::process::Command::new("/usr/bin/open")
-        .arg("-t")
-        .arg(&path)
+        .arg(&dir)
         .status()
-        .map_err(|error| format!("{name} を開けません：{error}"))?;
+        .map_err(|error| format!("ライブラリのフォルダを開けません：{error}"))?;
     if status.success() {
         Ok(())
     } else {
-        Err(format!("{name} を開けません"))
+        Err("ライブラリのフォルダを開けません".to_string())
     }
+}
+
+// 自作の Rust のライブラリのフォルダ（アプリのフォルダの libraries/rust/）を Finder で開く。なければ空のフォルダを作る（D-251）
+#[tauri::command]
+pub fn open_rust_library_folder(app: AppHandle) -> Result<(), String> {
+    let dir = crate::rust_bundle::ensure_library_dir(&app_dir(&app)?)?;
+    let status = std::process::Command::new("/usr/bin/open")
+        .arg(&dir)
+        .status()
+        .map_err(|error| format!("ライブラリのフォルダを開けません：{error}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err("ライブラリのフォルダを開けません".to_string())
+    }
+}
+
+// 自作の Python のライブラリのフォルダ（アプリのフォルダの libraries/python/）を Finder で開く。なければ空のフォルダを作る（D-252）
+#[tauri::command]
+pub fn open_python_library_folder(app: AppHandle) -> Result<(), String> {
+    let dir = crate::py_bundle::ensure_library_dir(&app_dir(&app)?)?;
+    let status = std::process::Command::new("/usr/bin/open")
+        .arg(&dir)
+        .status()
+        .map_err(|error| format!("ライブラリのフォルダを開けません：{error}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err("ライブラリのフォルダを開けません".to_string())
+    }
+}
+
+// 自作の Rust のライブラリを問題から読む、写して使う依存の行（D-251）。dir は libraries/rust/ の場所（見せるため）
+#[derive(serde::Serialize)]
+pub struct RustLibraryLines {
+    dir: String,
+    lines: Vec<String>,
+}
+
+#[tauri::command]
+pub fn rust_library_lines(app: AppHandle) -> Result<RustLibraryLines, String> {
+    let app_folder = app_dir(&app)?;
+    Ok(RustLibraryLines {
+        dir: app_folder
+            .join(crate::rust_bundle::LIBRARY_DIR)
+            .to_string_lossy()
+            .into_owned(),
+        lines: crate::rust_bundle::dependency_lines(&app_folder),
+    })
+}
+
+// 「コードをコピーして公式の提出ページを開く」でコピーする中身（D-148 §2.5）。提出と同じく、C++ は `#include "…"`（D-248。
+// 文法の確かめはしない）、Rust は `mod x;`（D-250）を展開する。expanded は展開したもの、missing は展開できなかったもの
+#[derive(serde::Serialize)]
+pub struct CopySource {
+    content: String,
+    expanded: Vec<String>,
+    missing: Vec<String>,
+}
+
+#[tauri::command]
+pub fn copy_source(
+    path: String,
+    app: AppHandle,
+    workspace: State<'_, Workspace>,
+) -> Result<CopySource, String> {
+    let root = workspace.root()?;
+    let content = read_text(&root, &path)?.content;
+    let file = crate::workspace::resolve(&root, &path).map_err(|error| error.to_string())?;
+    let extension = Path::new(&path).extension();
+    // Rust は `mod x;` を展開する（Phase 28。D-250）。名前は、ファイルの上の Cargo.toml のあるフォルダからの相対
+    if extension == Some(std::ffi::OsStr::new(Language::Rust.extension())) {
+        let package = file
+            .ancestors()
+            .skip(1)
+            .take_while(|dir| dir.starts_with(&root))
+            .find(|dir| dir.join("Cargo.toml").is_file())
+            .unwrap_or(&root)
+            .to_path_buf();
+        let expanded = crate::rust_expand::expand(&file, &content, &package)?;
+        let mut missing: Vec<String> = expanded
+            .missing
+            .iter()
+            .chain(&expanded.path_attributes)
+            .map(|name| format!("mod {name};"))
+            .collect();
+        missing.dedup();
+        let mut shown = expanded.modules;
+        let mut content = expanded.source;
+        // 使っている自作のライブラリも入れる（Phase 29。D-251。ビルドの確かめはしない）
+        if let Some(library_root) = crate::rust_bundle::library_dir(&app_dir(&app)?)
+            && let Some(cargo) = toolchain::find_cargo()
+        {
+            let metadata =
+                crate::rust_bundle::parse_metadata(&toolchain::metadata_json(&cargo, &package)?)?;
+            if let Some(info) = crate::rust_bundle::package_in(&metadata, &package) {
+                let read_metadata = |library: &Path| toolchain::metadata_json(&cargo, library);
+                let bundled = crate::rust_bundle::bundle(
+                    &content,
+                    &info.dependencies,
+                    &library_root,
+                    &read_metadata,
+                )?;
+                shown.extend(
+                    bundled
+                        .libraries
+                        .iter()
+                        .map(|label| format!("ライブラリ {label}")),
+                );
+                content = bundled.source;
+            }
+        }
+        return Ok(CopySource {
+            content,
+            expanded: shown,
+            missing,
+        });
+    }
+    // Python は、自作のモジュール（main.py のフォルダと libraries/python/）を埋め込む（Phase 30。D-252。
+    // 構文の確かめはしない）。処理系が見つからなければ、そのままコピーする
+    if extension == Some(std::ffi::OsStr::new(Language::Python.extension())) {
+        let python = lang_settings_of(&app).python;
+        let Ok(interpreter) = crate::python::find_interpreter(&python) else {
+            return Ok(CopySource {
+                content,
+                expanded: Vec::new(),
+                missing: Vec::new(),
+            });
+        };
+        let package_dir = file.parent().unwrap_or(&root);
+        let library = python.library.as_deref();
+        let found = crate::py_bundle::find(&interpreter, &file, package_dir, library)
+            .map_err(|error| error.message().to_string())?;
+        let read = |module: &Path| {
+            std::fs::read_to_string(module).map_err(|_| {
+                format!(
+                    "「{}」を読めません",
+                    crate::py_bundle::shown(module, package_dir, library)
+                )
+            })
+        };
+        let missing = if found.relative {
+            vec!["main.py の中の相対 import".to_string()]
+        } else {
+            Vec::new()
+        };
+        return Ok(
+            match crate::py_bundle::bundle(&content, &found, package_dir, library, &read)? {
+                Some(bundled) => CopySource {
+                    content: bundled.source,
+                    expanded: bundled.modules,
+                    missing,
+                },
+                None => CopySource {
+                    content,
+                    expanded: Vec::new(),
+                    missing,
+                },
+            },
+        );
+    }
+    if extension != Some(std::ffi::OsStr::new(Language::Cpp.extension())) {
+        return Ok(CopySource {
+            content,
+            expanded: Vec::new(),
+            missing: Vec::new(),
+        });
+    }
+    let cpp = cpp_settings_of(&app);
+    let expanded = crate::cpp_expand::expand(
+        &file,
+        &content,
+        &crate::cpp_expand::SearchDirs {
+            library: cpp.library.as_deref(),
+            ac_library: cpp.ac_library.as_deref(),
+        },
+    )?;
+    Ok(CopySource {
+        content: expanded.source,
+        expanded: expanded.headers,
+        missing: expanded.missing,
+    })
 }
 
 // VS Code の言語のスニペット（rust.json・cpp.json）を、言語のファイルに写す（D-187・D-213）。押したときだけ。
@@ -2119,25 +2355,30 @@ pub async fn save_settings(
     Ok(SaveSettingsOutcome::Saved)
 }
 
-// settings.json を、macOS の open コマンドで既定のテキストエディタで開く（D-159）。なければ既定の内容で作る
+// アプリのフォルダの settings.json・言語のスニペットのファイルを、IDE のタブで開く（D-247。今までの「既定のテキストエディタで
+// 開く」〔D-159・D-187〕を置き換え）。name はファイルの名前で、開けるものは app_files.rs が決める。なければ既定の中身で作る
 #[tauri::command]
-pub fn open_settings_file(app: AppHandle) -> Result<(), String> {
+pub fn read_app_file(name: String, app: AppHandle) -> Result<ReadResult, String> {
     ensure_primary(&app)?;
-    let dir = app_dir(&app)?;
-    let path = dir.join(storage::SETTINGS_FILE);
-    if !path.exists() {
-        storage::write_default_settings(&dir)?;
-    }
-    let status = std::process::Command::new("/usr/bin/open")
-        .arg("-t")
-        .arg(&path)
-        .status()
-        .map_err(|error| format!("settings.json を開けません：{error}"))?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err("settings.json を開けません".to_string())
-    }
+    app_files::read(&app_dir(&app)?, &name)
+}
+
+// アプリのフォルダのファイルを上書きする（D-247）。expected が null なら、外での変更を確かめずに書く（write_file と同じ）
+#[tauri::command]
+pub fn write_app_file(
+    name: String,
+    content: String,
+    expected: Option<Stamp>,
+    app: AppHandle,
+) -> Result<WriteResult, String> {
+    ensure_primary(&app)?;
+    app_files::write(&app_dir(&app)?, &name, &content, expected.as_ref())
+}
+
+// アプリのフォルダのファイルの今の更新日時と大きさ（D-247。窓に戻ったときの、外での変更の確かめ）
+#[tauri::command]
+pub fn app_file_stamps(names: Vec<String>, app: AppHandle) -> Result<Vec<Option<Stamp>>, String> {
+    Ok(app_files::stamps(&app_dir(&app)?, &names))
 }
 
 // レイアウト・開いているタブを保存する（作業 6）。作業領域のパスは Rust 側が持っているものを使う

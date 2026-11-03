@@ -60,6 +60,20 @@ export function fileStamps(paths: string[]): Promise<(Stamp | null)[]> {
   return invoke<(Stamp | null)[]>("file_stamps", { paths });
 }
 
+// アプリのフォルダのファイル（settings.json・言語のスニペットのファイル）を、名前で読み書きする（D-247）。
+// 読むときは、なければ既定の中身で作る。書き方・外での変更の確かめは、作業領域のファイルと同じ
+export function readAppFile(name: string): Promise<{ content: string; stamp: Stamp }> {
+  return invoke("read_app_file", { name });
+}
+
+export function writeAppFile(name: string, content: string, expected: Stamp | null): Promise<WriteResult> {
+  return invoke<WriteResult>("write_app_file", { name, content, expected });
+}
+
+export function appFileStamps(names: string[]): Promise<(Stamp | null)[]> {
+  return invoke<(Stamp | null)[]>("app_file_stamps", { names });
+}
+
 // 「再読み込み／上書き」を選ぶ画面を Rust 側で出す。再読み込みなら true
 export function askExternalChange(name: string): Promise<boolean> {
   return invoke<boolean>("ask_external_change", { name });

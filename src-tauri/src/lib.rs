@@ -1,7 +1,9 @@
+mod app_files;
 mod atcoder_problems;
 mod commands;
 mod compare;
 mod cpp;
+mod cpp_expand;
 mod debug;
 mod history;
 mod images;
@@ -15,9 +17,14 @@ mod menu;
 mod notify;
 mod problem;
 mod process;
+mod py_bundle;
 mod python;
 mod random;
 mod run;
+mod rust_bundle;
+mod rust_check;
+mod rust_expand;
+mod rust_lex;
 mod sanitize;
 mod scaffold;
 mod search;
@@ -140,16 +147,22 @@ pub fn run() {
             commands::replace_in_workspace,
             commands::undo_replace,
             commands::reload_snippets,
-            commands::open_snippets_file,
             commands::import_vscode_snippets,
             commands::template_files,
             commands::open_templates_folder,
+            commands::open_library_folder,
+            commands::open_rust_library_folder,
+            commands::rust_library_lines,
+            commands::open_python_library_folder,
+            commands::copy_source,
             commands::make_input,
             commands::fill_cpp_input,
             commands::fill_python_input,
             commands::reload_settings,
             commands::save_settings,
-            commands::open_settings_file,
+            commands::read_app_file,
+            commands::write_app_file,
+            commands::app_file_stamps,
             commands::finish_close,
             commands::cancel_close,
             commands::resolve_target,

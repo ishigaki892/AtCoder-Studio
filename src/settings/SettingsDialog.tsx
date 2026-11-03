@@ -226,8 +226,10 @@ function SettingsDialog({
     setDraft((current) => ({ ...current, [which]: clamped }));
   }
 
-  // ui を渡したら、設定の画面の形をそれにして保存する（「設定2で開く」）
-  async function save(ui?: "editor") {
+  // next が "editor" なら、設定の画面の形をそれにして保存する（「設定2で開く」）。関数なら、保存して閉じたあとに呼ぶ
+  // （「JSON で開く」「ファイルを開く」：IDE のタブで開くので、ダイアログの裏に隠れないように閉じる。D-247）
+  async function save(next?: "editor" | (() => void)) {
+    const ui = next === "editor" ? next : undefined;
     const appearanceToSave = ui ? { ...draft, settingsUi: ui } : draft;
     const bindings: LoadedKeyBinding[] = COMMANDS.map((command) => {
       const keys = assigned[command];
@@ -259,6 +261,8 @@ function SettingsDialog({
       onClose();
       if (ui) {
         onSwitchToEditor();
+      } else if (typeof next === "function") {
+        next();
       }
     } catch (e) {
       setNotice(String(e));
@@ -316,7 +320,13 @@ function SettingsDialog({
           >
             設定2で開く
           </button>
-          <button type="button" className="settings-link" onClick={onOpenJson}>
+          <button
+            type="button"
+            className="settings-link"
+            title="今の変更も保存してから、settings.json を IDE のタブで開きます"
+            disabled={saving || capturing !== null}
+            onClick={() => void save(onOpenJson)}
+          >
             JSON で開く
           </button>
         </div>
@@ -370,7 +380,7 @@ function SettingsDialog({
             <div className="settings-view">
               <p className="settings-note">
                 アプリのフォルダの言語ごとのファイルに、VS Code と同じ書き方で書きます。その言語のファイル（Rust は .rs、C++ は
-                .cpp・.hpp・.h など、Python は .py）で、呼び出す文字を打つと補完に出ます。書き換えたら、IDE の窓に戻ると読み直します。「VS
+                .cpp・.hpp・.h など、Python は .py）で、呼び出す文字を打つと補完に出ます。「ファイルを開く」で IDE のタブに開き、保存するとすぐ使います。「VS
                 Code から取り込む」は、VS Code のその言語のスニペット（rust.json・cpp.json・python.json）を写します（今のファイルは退避します）。
               </p>
               {LANGUAGES.map(({ value: language, label }) => (
@@ -379,7 +389,7 @@ function SettingsDialog({
                   language={language}
                   label={label}
                   snippets={snippets[language]}
-                  onOpen={() => onOpenSnippets(language).catch((e) => setNotice(String(e)))}
+                  onOpen={() => void save(() => void onOpenSnippets(language))}
                   onImport={async () => {
                     setNotice(null);
                     try {

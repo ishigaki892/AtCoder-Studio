@@ -401,7 +401,23 @@ function SettingsEditor(props: Props) {
     user: hit("AtCoder の ID", "atcoderProblems.user", "過去問", "AtCoder Problems", "AC 状況"),
     python: hit("Python の処理系", "python.interpreter", "CPython", "PyPy", "言語"),
     snippets: LANGUAGES.filter(({ value, label }) => hit("スニペット", label, snippetsFile(value), "snippets")),
-    templates: hit("テンプレート", "templates", "雛形", "main.rs", "main.cpp", "main.py", "dependencies.toml"),
+    templates: hit(
+      "テンプレート",
+      "templates",
+      "雛形",
+      "main.rs",
+      "main.cpp",
+      "main.py",
+      "dependencies.toml",
+      "ライブラリ",
+      "libraries",
+      "展開",
+      "Rust",
+      "crate",
+      "クレート",
+      "Python",
+      "モジュール",
+    ),
   };
   const sections = {
     view: show.rainbow || show.lens || show.crumbs || show.editorSize || show.problemSize || show.ui,
@@ -818,7 +834,7 @@ function SettingsEditor(props: Props) {
           {sections.snippets && (
             <div className="setting-item">
               <div className="setting-desc">
-                アプリのフォルダの言語ごとのファイルに、VS Code と同じ書き方で書きます。書き換えたら、IDE の窓に戻ると読み直します。
+                アプリのフォルダの言語ごとのファイルに、VS Code と同じ書き方で書きます。「ファイルを開く」で IDE のタブに開き、保存するとすぐ使います。
               </div>
               {show.snippets.map(({ value: language, label }) => (
                 <SnippetsSection

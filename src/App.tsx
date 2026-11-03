@@ -22,7 +22,6 @@ import {
   cancelClose,
   finishClose,
   loadAppState,
-  openSettingsFile,
   reloadSettings,
   saveAppState,
   DEFAULT_ATCODER_PROBLEMS_SETTINGS,
@@ -60,7 +59,7 @@ import {
 import FileTree from "./sidebar/FileTree";
 import ContestCreator from "./sidebar/ContestCreator";
 import SearchView from "./sidebar/SearchView";
-import { importVscodeSnippets, openSnippetsFile, reloadSnippets, snippetsFile } from "./ipc/snippets";
+import { importVscodeSnippets, reloadSnippets, snippetsFile } from "./ipc/snippets";
 import type { SnippetsViews } from "./settings/SettingsDialog";
 import { setSnippets } from "./editor/snippets";
 import TabBar from "./editor/TabBar";
@@ -92,7 +91,7 @@ import {
 } from "./ipc/problem";
 import { appendLog, describeFinish, type LogEntry } from "./panels/runLog";
 import { mergeCase, summarizeCases, summarizeInteractive } from "./panels/testCases";
-import { isReadOnlyKey } from "./editor/readOnlyKey";
+import { appKey, appName, isAppKey, isReadOnlyKey } from "./editor/readOnlyKey";
 import {
   findAllReferences,
   formatActiveDocument,
@@ -131,7 +130,7 @@ import { appendConsole, consoleKindOf, type ConsoleEntry, type ConsoleKind } fro
 import BottomRightPanel from "./panels/BottomRightPanel";
 import SubmissionPanel, { upsertSubmission, type SubmitNotice } from "./panels/SubmissionPanel";
 import { copyText } from "./panels/copyText";
-import { readFile } from "./ipc/workspace";
+import { copySource } from "./ipc/scaffold";
 import {
   atcoderLogin,
   atcoderLogout,
@@ -320,6 +319,9 @@ function panelFromDrag(column: HTMLElement, clientY: number): PanelState | null 
   return { ratio: clamped / rect.height, visible: true };
 }
 
+// アプリのフォルダの settings.json の名前（タブのキーは appKey(SETTINGS_JSON)。D-247）
+const SETTINGS_JSON = "settings.json";
+
 function App() {
   const [sidebar, setSidebar] = useState<ColumnState>({
     width: SIDEBAR_WIDTH,
@@ -385,7 +387,18 @@ function App() {
   // ファイルの作成・名前の変更・削除の後に、一覧を読み直すきっかけ（作業 4c）
   const [treeRefreshKey, setTreeRefreshKey] = useState(0);
   const showError = useCallback((message: string) => setError(message), []);
-  const tabs = useTabs(showError);
+  // アプリのフォルダのファイル（settings.json・言語のスニペットのファイル）のタブを保存したら、すぐ読み直して使う（D-247）。
+  // 書き方が崩れていれば、今までの外のエディタで書いたときと同じく、今の設定のまま知らせる
+  const tabs = useTabs(showError, (path) => {
+    if (!isAppKey(path)) {
+      return;
+    }
+    if (appName(path) === SETTINGS_JSON) {
+      void reloadSettingsOnFocus();
+    } else {
+      void reloadSnippetsFile(false);
+    }
+  });
   const activeTab = tabs.tabs.find((tab) => tab.path === tabs.activePath) ?? null;
 
   // 実行の状態（D-013）
@@ -567,8 +580,8 @@ function App() {
   useEffect(() => {
     const path = tabs.activePath;
     // 信頼していないフォルダでは、cargo を動かして対象を決めない（D-128）。
-    // 読み取り専用のタブ（作業領域の外のソース）からは決めない（直前の対象を使い続ける）
-    if (!path || untrusted || isReadOnlyKey(path)) {
+    // 読み取り専用のタブ（作業領域の外のソース）・アプリのフォルダのファイルのタブ（D-247）からは決めない（直前の対象を使い続ける）
+    if (!path || untrusted || isReadOnlyKey(path) || isAppKey(path)) {
       return;
     }
     let cancelled = false;
@@ -806,13 +819,22 @@ function App() {
         setCopyNote("保存できなかったファイルがあるので、コピーしませんでした");
         return;
       }
-      const { content } = await readFile(file);
+      // 提出と同じく、C++ は `#include "…"`（D-248）、Rust は `mod x;`（D-250）、Python は自作のモジュール（D-252）を展開したものをコピーする
+      const { content, expanded, missing } = await copySource(file);
+      const what = file.endsWith(".rs") || file.endsWith(".py") ? "モジュール" : "ヘッダー";
       if (!(await copyText(content))) {
         setCopyNote("コピーできませんでした");
         return;
       }
       await openSubmitPage(problem);
-      setCopyNote("コードをコピーし、提出のページをブラウザで開きました");
+      const notes = ["コードをコピーし、提出のページをブラウザで開きました"];
+      if (expanded.length > 0) {
+        notes.push(`展開した${what}：${expanded.join("、")}`);
+      }
+      if (missing.length > 0) {
+        notes.push(`展開していない${what}：${missing.join("、")}（ジャッジには、このファイルだけが置かれます）`);
+      }
+      setCopyNote(notes.join("。"));
     } catch (e) {
       setCopyNote(String(e));
     }
@@ -1386,11 +1408,28 @@ function App() {
     setAtcoderProblemsSettings(atcoderProblems);
     setProblemSettings(problem);
     setPythonSettings((current) => ({ ...current, interpreter }));
+    // settings.json のタブを開いていれば、新しい中身に読み直す（未保存の編集があれば、そのまま。保存のときに外での変更として聞く）
+    void reloadAppTab(SETTINGS_JSON);
   }
 
-  // settings.json を既定のテキストエディタで開く（設定の画面の「JSON で開く」）
+  // アプリのフォルダのファイルのタブを開いていて、未保存の編集がなければ読み直す（設定の画面・取り込みで書き換えたとき。D-247）
+  async function reloadAppTab(name: string) {
+    const key = appKey(name);
+    if (tabs.tabs.some((tab) => tab.path === key && !tab.dirty)) {
+      await tabs.reload(key);
+    }
+  }
+
+  // settings.json・言語のスニペットのファイルを、IDE のタブで開く（設定の画面の「JSON で開く」「ファイルを開く」。D-247。
+  // 今までは既定のテキストエディタで開いていた〔D-159・D-187〕）。なければ Rust 側が既定の中身で作る
+  async function openAppFile(name: string) {
+    await handleOpenFile(appKey(name));
+  }
   function openSettingsJson() {
-    openSettingsFile().catch((e) => setError(String(e)));
+    void openAppFile(SETTINGS_JSON);
+  }
+  async function openSnippetsTab(language: Language) {
+    await openAppFile(snippetsFile(language));
   }
 
   // メニューの「rust-analyzer を再起動」（D-130。キー割り当ては置かない）。
@@ -1516,6 +1555,7 @@ function App() {
       return null;
     }
     await reloadSnippetsFile(true);
+    await reloadAppTab(snippetsFile(language));
     const parts = [`VS Code のスニペット ${done.count} 件を ${snippetsFile(language)} に取り込みました`];
     if (done.problems > 0) {
       parts.push(`読めない項目が ${done.problems} 個あります`);
@@ -1581,15 +1621,15 @@ function App() {
         pastProblems: extraState("past"),
         settingsTab: extraState("settings"),
       },
-      // 読み取り専用のタブ（作業領域の外のソース）は、再起動では戻さない
-      tabs.tabs.filter((tab) => !tab.readOnly).map((tab) => tab.path),
-      activeTab?.readOnly ? null : tabs.activePath,
+      // 読み取り専用のタブ（作業領域の外のソース）と、アプリのフォルダのファイルのタブ（D-247）は、再起動では戻さない
+      tabs.tabs.filter((tab) => !tab.readOnly && !isAppKey(tab.path)).map((tab) => tab.path),
+      activeTab?.readOnly || (activeTab && isAppKey(activeTab.path)) ? null : tabs.activePath,
     );
   }
 
   // レイアウト・開いているタブが変わってから 0.5 秒後に保存する（作業 6。ドラッグの途中で書き続けないため）
   const tabPaths = tabs.tabs
-    .filter((tab) => !tab.readOnly)
+    .filter((tab) => !tab.readOnly && !isAppKey(tab.path))
     .map((tab) => tab.path)
     .join("\n");
   useEffect(() => {
@@ -1929,7 +1969,7 @@ function App() {
               onReload={reloadSettingsOnFocus}
               onOpenJson={openSettingsJson}
               snippets={snippetsView}
-              onOpenSnippets={(language) => openSnippetsFile(language)}
+              onOpenSnippets={openSnippetsTab}
               onImportSnippets={importSnippets}
               onSwitchToDialog={() => {
                 closeExtra("settings");
@@ -2079,7 +2119,7 @@ function App() {
           onReload={reloadSettingsOnFocus}
           onOpenJson={openSettingsJson}
           snippets={snippetsView}
-          onOpenSnippets={(language) => openSnippetsFile(language)}
+          onOpenSnippets={openSnippetsTab}
           onImportSnippets={importSnippets}
           onSwitchToEditor={() => openExtra("settings")}
         />

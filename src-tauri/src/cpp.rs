@@ -37,6 +37,20 @@ pub struct CppSettings {
     pub compiler: String,
     #[serde(skip)]
     pub ac_library: Option<PathBuf>,
+    // 自作のライブラリのフォルダ（アプリのフォルダの libraries/cpp/。あれば IDE が入れる。D-248）
+    #[serde(skip)]
+    pub library: Option<PathBuf>,
+}
+
+impl CppSettings {
+    // -I に渡すフォルダ（自作のライブラリ、AC Library の順。D-206・D-248）
+    pub fn include_dirs(&self) -> Vec<PathBuf> {
+        [&self.library, &self.ac_library]
+            .into_iter()
+            .flatten()
+            .cloned()
+            .collect()
+    }
 }
 
 // AC Library の置き場所（アプリのフォルダの中。D-206）。この下に atcoder/ を置く
@@ -46,6 +60,22 @@ pub const AC_LIBRARY_DIR: &str = "libraries/ac-library";
 pub fn ac_library_dir(app_dir: &Path) -> Option<PathBuf> {
     let dir = app_dir.join(AC_LIBRARY_DIR);
     dir.join("atcoder").is_dir().then_some(dir)
+}
+
+// 自作のライブラリの置き場所（アプリのフォルダの中。D-248）。提出と「コードをコピー」のときに展開する（cpp_expand.rs）
+pub const LIBRARY_DIR: &str = "libraries/cpp";
+
+// アプリのフォルダに自作のライブラリのフォルダがあれば、その場所（-I に渡す）
+pub fn library_dir(app_dir: &Path) -> Option<PathBuf> {
+    let dir = app_dir.join(LIBRARY_DIR);
+    dir.is_dir().then_some(dir)
+}
+
+// 自作のライブラリのフォルダ。なければ空のフォルダを作る（設定の画面の「ライブラリのフォルダを開く」。D-248）
+pub fn ensure_library_dir(app_dir: &Path) -> Result<PathBuf, String> {
+    let dir = app_dir.join(LIBRARY_DIR);
+    std::fs::create_dir_all(&dir).map_err(|_| "ライブラリのフォルダを作れません".to_string())?;
+    Ok(dir)
 }
 
 // file（canonicalize 済み）が、C++ のパッケージ dir の main.cpp か、dir の test/ の中なら、その対象（D-204）
@@ -160,19 +190,13 @@ pub fn build_args(release: bool, output: &Path, settings: &CppSettings) -> Vec<S
         output,
         SOURCE,
         sdk_path(),
-        settings.ac_library.as_deref(),
+        &settings.include_dirs(),
     )
 }
 
 // example（source はパッケージからの相対パス。`examples/gen.cpp` など）を、提出用と同じ引数でビルドする（D-212）
 pub fn build_args_for(source: &str, output: &Path, settings: &CppSettings) -> Vec<String> {
-    build_args_with(
-        true,
-        output,
-        source,
-        sdk_path(),
-        settings.ac_library.as_deref(),
-    )
+    build_args_with(true, output, source, sdk_path(), &settings.include_dirs())
 }
 
 fn build_args_with(
@@ -180,15 +204,56 @@ fn build_args_with(
     output: &Path,
     source: &str,
     sdk: Option<&str>,
-    ac_library: Option<&Path>,
+    includes: &[PathBuf],
 ) -> Vec<String> {
-    let mut args = flags_with(release, sdk, ac_library);
+    let mut args = flags_with(release, sdk, includes);
     args.extend([
         "-o".into(),
         output.to_string_lossy().into_owned(),
         source.into(),
     ]);
     args
+}
+
+// 展開したソース（標準入力で渡す）を、提出用と同じ引数で文法だけ確かめる（-fsyntax-only。Phase 27。D-248）。
+// includes には自作のライブラリのフォルダを入れない（展開したものだけでコンパイルできるかを見る）。空のフォルダで動かすので、
+// 残った `#include "…"`（見つからなかったもの）は、ジャッジと同じく見つからない。通らなければ g++ のエラーの頭を返す
+pub fn check_syntax(compiler: &Path, source: &str, includes: &[PathBuf]) -> Result<(), String> {
+    use std::io::Write;
+    let empty = std::env::temp_dir().join(format!("atcoder-studio-syntax-{}", std::process::id()));
+    std::fs::create_dir_all(&empty).map_err(|_| "展開したコードを確かめられません".to_string())?;
+    let mut command = Command::new(compiler);
+    command
+        .args(flags_with(true, sdk_path(), includes))
+        .args(["-fsyntax-only", "-x", "c++", "-"])
+        .current_dir(&empty)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped());
+    crate::toolchain::clear_ide_env(&mut command);
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("展開したコードを確かめられません（{error}）"))?;
+    if let Some(mut stdin) = child.stdin.take() {
+        // 書けなくても（g++ が先に終わったなど）、終わり方で判断する
+        let _ = stdin.write_all(source.as_bytes());
+    }
+    let output = child
+        .wait_with_output()
+        .map_err(|error| format!("展開したコードを確かめられません（{error}）"))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let head: String = stderr
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .take(12)
+        .collect::<Vec<_>>()
+        .join("\n");
+    Err(format!(
+        "ヘッダーを展開したコードを g++ で確かめると、エラーがあるので送りません（<stdin> の行は、展開したあとの行です）：\n{head}"
+    ))
 }
 
 // パッケージの examples/ の .cpp の名前（拡張子を除く。名前の順）。ランダムテストの生成器・愚直解、
@@ -218,7 +283,7 @@ pub fn example_output_path(dir: &Path, name: &str) -> PathBuf {
 }
 
 // ビルドのオプション（出力の場所とソースの前まで）
-fn flags_with(release: bool, sdk: Option<&str>, ac_library: Option<&Path>) -> Vec<String> {
+fn flags_with(release: bool, sdk: Option<&str>, includes: &[PathBuf]) -> Vec<String> {
     let mut args: Vec<String> = vec!["-std=gnu++23".into()];
     if release {
         args.push("-O2".into());
@@ -243,7 +308,7 @@ fn flags_with(release: bool, sdk: Option<&str>, ac_library: Option<&Path>) -> Ve
     if let Some(sdk) = sdk {
         args.extend(["-isysroot".into(), sdk.to_string()]);
     }
-    if let Some(dir) = ac_library {
+    for dir in includes {
         args.push(format!("-I{}", dir.to_string_lossy()));
     }
     args
@@ -262,11 +327,11 @@ fn analysis_command_with(
     compiler: &Path,
     file: &Path,
     sdk: Option<&str>,
-    ac_library: Option<&Path>,
+    includes: &[PathBuf],
 ) -> Vec<String> {
     let mut command = vec![compiler.to_string_lossy().into_owned()];
     command.extend(
-        flags_with(true, sdk, ac_library)
+        flags_with(true, sdk, includes)
             .into_iter()
             .filter(|flag| !GCC_ONLY.iter().any(|prefix| flag.starts_with(prefix))),
     );
@@ -282,19 +347,14 @@ pub fn compilation_database(
     packages: &[PathBuf],
     settings: &CppSettings,
 ) -> serde_json::Value {
-    compilation_database_with(
-        compiler,
-        packages,
-        sdk_path(),
-        settings.ac_library.as_deref(),
-    )
+    compilation_database_with(compiler, packages, sdk_path(), &settings.include_dirs())
 }
 
 fn compilation_database_with(
     compiler: &Path,
     packages: &[PathBuf],
     sdk: Option<&str>,
-    ac_library: Option<&Path>,
+    includes: &[PathBuf],
 ) -> serde_json::Value {
     let mut changes = serde_json::Map::new();
     for package in packages {
@@ -314,7 +374,7 @@ fn compilation_database_with(
             if changes.len() >= MAX_ANALYZED_FILES {
                 break;
             }
-            let command = analysis_command_with(compiler, &file, sdk, ac_library);
+            let command = analysis_command_with(compiler, &file, sdk, includes);
             changes.insert(
                 file.to_string_lossy().into_owned(),
                 serde_json::json!({
@@ -341,8 +401,8 @@ fn parse_search_dirs(stderr: &str) -> Vec<PathBuf> {
 }
 
 // 定義ジャンプの行き先として、読み取り専用で開いてよい C++ のヘッダーの場所（D-210・D-133）。
-// GCC の検索の場所（`g++ -E -v`）、SDK の usr/include、AC Library。canonicalize 済み、ないものは載せない
-pub fn header_dirs(compiler: &Path, ac_library: Option<&Path>) -> Vec<PathBuf> {
+// GCC の検索の場所（`g++ -E -v`）、SDK の usr/include、自作のライブラリと AC Library（includes）。canonicalize 済み、ないものは載せない
+pub fn header_dirs(compiler: &Path, includes: &[PathBuf]) -> Vec<PathBuf> {
     let mut command = Command::new(compiler);
     command.args(["-E", "-v", "-x", "c++", "/dev/null"]);
     crate::toolchain::clear_ide_env(&mut command);
@@ -353,7 +413,7 @@ pub fn header_dirs(compiler: &Path, ac_library: Option<&Path>) -> Vec<PathBuf> {
     if let Some(sdk) = sdk_path() {
         dirs.push(Path::new(sdk).join("usr/include"));
     }
-    dirs.extend(ac_library.map(Path::to_path_buf));
+    dirs.extend(includes.iter().cloned());
     let mut real: Vec<PathBuf> = Vec::new();
     for dir in dirs.iter().filter_map(|dir| dir.canonicalize().ok()) {
         if !real.contains(&dir) {
@@ -368,8 +428,8 @@ pub const CLANG_FORMAT: &str =
     "# AtCoder Studio が作った。clangd の整形の書き方\nBasedOnStyle: LLVM\nIndentWidth: 4\n";
 
 // パッケージの compile_flags.txt の中身（clangd が読む。Phase 17 の言語機能で使う。D-208・D-210）。
-// ビルドと同じ言語の版・定義と、AC Library の場所。1 行に 1 つ
-pub fn compile_flags(ac_library: Option<&Path>) -> String {
+// ビルドと同じ言語の版・定義と、自作のライブラリ・AC Library の場所（includes）。1 行に 1 つ
+pub fn compile_flags(includes: &[PathBuf]) -> String {
     let mut flags: Vec<String> = [
         "-std=gnu++23",
         "-Wall",
@@ -379,7 +439,7 @@ pub fn compile_flags(ac_library: Option<&Path>) -> String {
     ]
     .map(String::from)
     .to_vec();
-    if let Some(dir) = ac_library {
+    for dir in includes {
         flags.push(format!("-I{}", dir.to_string_lossy()));
     }
     let mut text = flags.join("\n");
@@ -529,7 +589,7 @@ mod tests {
         for compiler in ["/nonexistent/g++-15", "g++-15"] {
             let error = find_compiler(&CppSettings {
                 compiler: compiler.to_string(),
-                ac_library: None,
+                ..CppSettings::default()
             })
             .unwrap_err();
             assert!(error.contains(compiler), "{error}");
@@ -545,7 +605,7 @@ mod tests {
             output,
             SOURCE,
             Some("/sdk"),
-            Some(Path::new("/app/acl")),
+            &[PathBuf::from("/app/lib"), PathBuf::from("/app/acl")],
         );
         for expected in [
             "-std=gnu++23",
@@ -557,9 +617,12 @@ mod tests {
             assert!(args.iter().any(|arg| arg == expected), "{expected}");
         }
         assert!(args.windows(2).any(|pair| pair == ["-isysroot", "/sdk"]));
-        assert!(args.iter().any(|arg| arg == "-I/app/acl"));
+        // 自作のライブラリ（D-248）を AC Library より先に探す
+        let lib = args.iter().position(|arg| arg == "-I/app/lib").unwrap();
+        let acl = args.iter().position(|arg| arg == "-I/app/acl").unwrap();
+        assert!(lib < acl);
         assert_eq!(args[args.len() - 3..], ["-o", "/p/target/main", "main.cpp"]);
-        let debug = build_args_with(false, output, SOURCE, None, None);
+        let debug = build_args_with(false, output, SOURCE, None, &[]);
         assert!(debug.iter().any(|arg| arg == "-g") && debug.iter().any(|arg| arg == "-O0"));
         // 範囲外の読み書きの検査は、デバッグ用のビルドだけ（D-214）
         assert!(debug.iter().any(|arg| arg == "-D_GLIBCXX_ASSERTIONS"));
@@ -574,10 +637,17 @@ mod tests {
     #[test]
     fn writes_compile_flags_for_clangd() {
         assert_eq!(
-            compile_flags(Some(Path::new("/app/acl"))),
-            "-std=gnu++23\n-Wall\n-Wextra\n-DATCODER\n-DONLINE_JUDGE\n-I/app/acl\n"
+            compile_flags(&[PathBuf::from("/app/lib"), PathBuf::from("/app/acl")]),
+            "-std=gnu++23\n-Wall\n-Wextra\n-DATCODER\n-DONLINE_JUDGE\n-I/app/lib\n-I/app/acl\n"
         );
-        assert!(!compile_flags(None).contains("-I"));
+        assert!(!compile_flags(&[]).contains("-I"));
+        // 設定からは、ある場所だけを、自作のライブラリ・AC Library の順に渡す
+        let settings = CppSettings {
+            library: Some(PathBuf::from("/app/lib")),
+            ac_library: None,
+            ..CppSettings::default()
+        };
+        assert_eq!(settings.include_dirs(), [PathBuf::from("/app/lib")]);
     }
 
     #[test]
@@ -639,7 +709,7 @@ compilation terminated.
             compiler,
             &[package.clone(), empty],
             Some("/sdk"),
-            Some(Path::new("/app/acl")),
+            &[PathBuf::from("/app/acl")],
         );
         let changes = database["compilationDatabaseChanges"].as_object().unwrap();
         let main = package.join(SOURCE).to_string_lossy().into_owned();
@@ -725,6 +795,28 @@ compilation terminated.
     }
 
     // 手元に g++-15 があるときだけ、本当にビルドして動かす
+    // 展開したものの文法の確かめ（Phase 27。D-248）：通る・誤りがある・残った `#include "…"` は見つからない
+    #[test]
+    fn checks_the_syntax_of_expanded_sources() {
+        let Ok(compiler) = find_compiler(&CppSettings::default()) else {
+            eprintln!("g++ が見つからないので飛ばす");
+            return;
+        };
+        assert_eq!(
+            check_syntax(
+                &compiler,
+                "#include <bits/stdc++.h>\nstruct Seg { int f() { return 1; } };\nint main() { return Seg{}.f(); }\n",
+                &[],
+            ),
+            Ok(())
+        );
+        let error = check_syntax(&compiler, "struct Seg {\nint main() {}\n", &[]).unwrap_err();
+        assert!(error.contains("<stdin>"), "{error}");
+        let error =
+            check_syntax(&compiler, "#include \"seg.hpp\"\nint main() {}\n", &[]).unwrap_err();
+        assert!(error.contains("seg.hpp"), "{error}");
+    }
+
     #[test]
     fn builds_and_runs_with_local_gcc() {
         let Ok(compiler) = find_compiler(&CppSettings::default()) else {
@@ -751,6 +843,7 @@ compilation terminated.
         let settings = CppSettings {
             compiler: String::new(),
             ac_library: Some(library.0.clone()),
+            ..CppSettings::default()
         };
         std::fs::write(
             dir.0.join(SOURCE),

@@ -9,10 +9,12 @@ import { closeReferencePanel } from "@codemirror/lsp-client";
 import { cpp } from "@codemirror/lang-cpp";
 import { rustLanguage } from "@codemirror/lang-rust";
 import { python } from "@codemirror/lang-python";
+import { jsonLanguage, jsonParseLinter } from "@codemirror/lang-json";
+import { linter } from "@codemirror/lint";
 import { HighlightStyle, LanguageSupport, indentUnit, syntaxHighlighting } from "@codemirror/language";
 import { styleTags, tags } from "@lezer/highlight";
 import { followActiveFile, lspCompartment, withoutLsp } from "./lsp";
-import { isReadOnlyKey } from "./readOnlyKey";
+import { isAppKey, isReadOnlyKey } from "./readOnlyKey";
 import { isCppPath, isPythonPath } from "./language";
 import type { Language } from "../ipc/workspace";
 import { japanesePhrases } from "./phrases";
@@ -154,6 +156,21 @@ const cppSupport = cpp();
 // Python の色分け（Phase 19 作業 1。D-222）。.py のファイル
 const pythonSupport = python();
 
+// JSON の色分け（settings.json・言語のスニペットのファイル。D-247）。キーと true・false・null の色は、JSON にだけ効かせる
+// （ほかの言語の true などの色は変えない）。書き方の誤りには印を付ける（崩れている間は、今の設定のまま動くため）
+const jsonSupport = new LanguageSupport(jsonLanguage, [
+  syntaxHighlighting(
+    HighlightStyle.define(
+      [
+        { tag: [tags.propertyName, tags.definition(tags.propertyName)], color: "var(--syntax-variable)" },
+        { tag: [tags.bool, tags.null], color: "var(--syntax-keyword)" },
+      ],
+      { scope: jsonLanguage },
+    ),
+  ),
+  linter(jsonParseLinter()),
+]);
+
 const languageSupport: Record<Language, LanguageSupport> = {
   rust: rustSupport,
   cpp: cppSupport,
@@ -184,11 +201,14 @@ export function createEditorState(
 ): EditorState {
   const readOnly = options?.readOnly === true;
   const language = options?.language ?? languageOfPath(options?.path);
+  const isJson = options?.path?.endsWith(".json") === true;
+  // アプリのフォルダのファイル（D-247）は、デバッグの対象ではないので、ブレークポイントを付けない
+  const appFile = options?.path !== undefined && isAppKey(options.path);
   return EditorState.create({
     doc: text,
     extensions: [
       EditorState.readOnly.of(readOnly),
-      debugExtensions({ breakpoints: !readOnly }),
+      debugExtensions({ breakpoints: !readOnly && !appFile }),
       // Esc は、参照の一覧（⇧F12）が出ていれば閉じる（なければ何もしない）。F12・⇧F12 はキー割り当ての表で扱う（keybindings.ts）
       keymap.of([
         { key: "Tab", run: acceptCompletion },
@@ -199,7 +219,7 @@ export function createEditorState(
       basicSetup,
       // 検索・置換などの画面の文字を日本語にする（Phase 4a 作業 5）
       japanesePhrases,
-      languageSupport[language],
+      isJson ? jsonSupport : languageSupport[language],
       editorTheme,
       syntaxHighlighting(highlightStyle),
       indentRainbow,

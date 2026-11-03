@@ -275,12 +275,18 @@ fn free_port() -> Result<u16, String> {
 }
 
 // デバッグ対象を debugpy の中で動かす命令（パッケージのディレクトリで、script は相対パス）。
-// -E・-B・-X int_max_str_digits=0 は実行と同じ。-X frozen_modules=off は debugpy がブレークポイントを見落とさないように
-fn debugpy_command(interpreter: &Path, debugpy: &Path, port: u16, script: &str) -> Command {
+// 環境（PythonEnv。D-252）・-B・-X int_max_str_digits=0 は実行と同じ。-X frozen_modules=off は debugpy がブレークポイントを見落とさないように
+fn debugpy_command(
+    interpreter: &Path,
+    debugpy: &Path,
+    port: u16,
+    script: &str,
+    env: &python::PythonEnv,
+) -> Command {
     let mut command = Command::new(interpreter);
+    env.apply(&mut command);
     command
         .args([
-            "-E",
             "-B",
             "-X",
             "int_max_str_digits=0",
@@ -902,9 +908,9 @@ impl Client {
     }
 
     // デバッグ対象を debugpy の中で起動し（新しいプロセスグループ。標準入力は input）、TCP でつなぐ（D-226）。
-    // つなげるまで、debugpy が終わる・止める印・時間切れを見る
+    // 処理系と環境は実行の命令（executable）のもの（D-252）。つなげるまで、debugpy が終わる・止める印・時間切れを見る
     fn spawn_debugpy(
-        interpreter: &Path,
+        executable: &crate::run::Program,
         debugpy: &Path,
         dir: &Path,
         root: &Path,
@@ -919,7 +925,13 @@ impl Client {
                 input.display()
             )
         })?;
-        let mut command = debugpy_command(interpreter, debugpy, port, python::SOURCE);
+        let mut command = debugpy_command(
+            &executable.path,
+            debugpy,
+            port,
+            python::SOURCE,
+            &executable.python.clone().unwrap_or_default(),
+        );
         command
             .current_dir(dir)
             .process_group(0)
@@ -1411,15 +1423,9 @@ pub fn debug_target(
     let spawned = match &adapter {
         Adapter::Lldb(path) => Client::spawn(path, dir, root, environment.home.as_deref(), channel),
         // debugpy では、実行の命令の処理系（executable.path）でデバッグ対象を起動する
-        Adapter::Debugpy(debugpy) => Client::spawn_debugpy(
-            &executable.path,
-            debugpy,
-            dir,
-            root,
-            &input,
-            cancel,
-            channel,
-        ),
+        Adapter::Debugpy(debugpy) => {
+            Client::spawn_debugpy(&executable, debugpy, dir, root, &input, cancel, channel)
+        }
     };
     let (client, mut child, notices) = match spawned {
         Ok(spawned) => spawned,
@@ -2589,15 +2595,20 @@ main()
         // CPython 用は別の場所
         assert!(find_debugpy(Some(&ws.0), Interpreter::Cpython, Path::new("/x")).is_err());
         // 起動の命令：-X frozen_modules=off、debugpy の場所、127.0.0.1 のポート、つなぎを待つ
-        let command = debugpy_command(Path::new("/py"), &dir, 5678, "main.py");
+        let command = debugpy_command(
+            Path::new("/py"),
+            &dir,
+            5678,
+            "main.py",
+            &python::PythonEnv::default(),
+        );
         let args: Vec<String> = command
             .get_args()
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect();
         assert_eq!(
-            args[..6],
+            args[..5],
             [
-                "-E",
                 "-B",
                 "-X",
                 "int_max_str_digits=0",
@@ -2605,9 +2616,9 @@ main()
                 "frozen_modules=off"
             ]
         );
-        assert_eq!(args[6], "-c");
+        assert_eq!(args[5], "-c");
         assert_eq!(
-            args[8..],
+            args[7..],
             [
                 dir.display().to_string(),
                 "--listen".to_string(),

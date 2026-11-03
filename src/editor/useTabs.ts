@@ -1,14 +1,18 @@
 import { useRef, useState } from "react";
 import type { EditorState } from "@codemirror/state";
 import {
+  appFileStamps,
   askDiscardChanges,
   askExternalChange,
   fileStamps,
+  readAppFile,
   readFile,
   readSource,
+  writeAppFile,
   writeFile,
   type Stamp,
 } from "../ipc/workspace";
+import { appName, isAppKey } from "./readOnlyKey";
 import { isCppPath, isPythonPath } from "./language";
 import { createEditorState } from "./Editor";
 import { fromFileContent, toFileContent, type TextFormat } from "./fileText";
@@ -37,10 +41,35 @@ function sameStamp(a: Stamp, b: Stamp) {
   return a.modified === b.modified && a.size === b.size;
 }
 
+// タブのキーで、作業領域のファイルか、アプリのフォルダのファイル（settings.json など。D-247）かを分けて読み書きする
+function readTabFile(path: string) {
+  return isAppKey(path) ? readAppFile(appName(path)) : readFile(path);
+}
+
+function writeTabFile(path: string, content: string, expected: Stamp | null) {
+  return isAppKey(path) ? writeAppFile(appName(path), content, expected) : writeFile(path, content, expected);
+}
+
+// 今の更新日時と大きさ（paths の順）。作業領域のファイルとアプリのフォルダのファイルを、それぞれまとめて聞く
+async function tabFileStamps(paths: string[]): Promise<(Stamp | null)[]> {
+  const app = paths.filter(isAppKey);
+  const workspace = paths.filter((path) => !isAppKey(path));
+  const [appStamps, workspaceStamps] = await Promise.all([
+    app.length > 0 ? appFileStamps(app.map(appName)) : Promise.resolve([]),
+    workspace.length > 0 ? fileStamps(workspace) : Promise.resolve([]),
+  ]);
+  return paths.map((path) =>
+    isAppKey(path) ? (appStamps[app.indexOf(path)] ?? null) : (workspaceStamps[workspace.indexOf(path)] ?? null),
+  );
+}
+
 // タブの一覧と、開いているタブを扱う。
 // エディタの状態（内容・取り消しの履歴・カーソル）はタブごとに参照で持ち、入力のたびに描き直さない。
 // タブの一覧も参照で持ち（非同期の処理から最新の値を読むため）、変えたときだけ描き直す
-export function useTabs(onError: (message: string) => void) {
+// onSaved は、タブを保存できたとき（外での変更を読み直したときは呼ばない）に呼ぶ。settings.json などを、保存したらすぐ使うため（D-247）
+export function useTabs(onError: (message: string) => void, onSaved?: (path: string) => void) {
+  const onSavedRef = useRef(onSaved);
+  onSavedRef.current = onSaved;
   const tabsRef = useRef<Tab[]>([]);
   const [tabs, setTabsState] = useState<Tab[]>([]);
   const [activePath, setActivePath] = useState<string | null>(null);
@@ -98,7 +127,7 @@ export function useTabs(onError: (message: string) => void) {
       return;
     }
     try {
-      const { content, stamp } = await readFile(path);
+      const { content, stamp } = await readTabFile(path);
       // 読み込みを待つ間に、同じファイルが開かれていれば（ダブルクリックなど）、そのタブを使う（Phase 10 作業 9）
       if (states.current.has(path)) {
         activate(path);
@@ -151,7 +180,7 @@ export function useTabs(onError: (message: string) => void) {
   // ファイルを読み直し、タブの内容を入れ替える（未保存の編集は捨てる）
   async function reload(path: string) {
     try {
-      const { content, stamp } = await readFile(path);
+      const { content, stamp } = await readTabFile(path);
       const { text, format } = fromFileContent(content);
       clearTimer(path);
       states.current.set(path, createEditorState(text, { snippets: path.endsWith(".rs") || isCppPath(path) || isPythonPath(path), path }));
@@ -170,11 +199,7 @@ export function useTabs(onError: (message: string) => void) {
     }
     // 保存する時点の文書。CodeMirror の文書は編集のたびに新しいものになる
     const savedDoc = state.doc;
-    const result = await writeFile(
-      path,
-      toFileContent(savedDoc.toString(), tab.format),
-      force ? null : tab.stamp,
-    );
+    const result = await writeTabFile(path, toFileContent(savedDoc.toString(), tab.format), force ? null : tab.stamp);
     if (result.kind === "conflict") {
       // 外部で変更されていた。未保存の編集があるので、再読み込みか上書きかを選んでもらう（D-038）
       if (await ask(baseName(path))) {
@@ -187,6 +212,7 @@ export function useTabs(onError: (message: string) => void) {
     patch(path, { stamp: result.stamp, dirty: states.current.get(path)?.doc !== savedDoc });
     // rust-analyzer に保存を知らせる（保存時の検査。Phase 3b-1）
     notifySaved(path);
+    onSavedRef.current?.(path);
     return true;
   }
 
@@ -304,7 +330,7 @@ export function useTabs(onError: (message: string) => void) {
       if (current.length === 0) {
         return;
       }
-      const stamps = await fileStamps(current.map((tab) => tab.path));
+      const stamps = await tabFileStamps(current.map((tab) => tab.path));
       for (const [i, tab] of current.entries()) {
         const stamp = stamps[i];
         // 保存で更新された最新の値と比べる。閉じたタブは確かめない

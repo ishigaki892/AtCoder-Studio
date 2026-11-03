@@ -765,25 +765,30 @@ fn find_basedpyright() -> Result<PathBuf, String> {
 }
 
 // basedpyright に渡す設定（workspace/configuration の答え。D-225）。処理系（見つからなければ渡さない）、
-// 型の検査は standard、調べるのは開いているファイルだけ
-fn basedpyright_configuration(interpreter: Option<&Path>) -> Value {
+// 型の検査は standard、調べるのは開いているファイルだけ。自作のライブラリのフォルダ（libraries/python/）があれば、
+// import を探す場所に足す（extraPaths。D-252。basedpyright は diagnosticMode と同じ analysis の欄から読む）
+fn basedpyright_configuration(interpreter: Option<&Path>, library: Option<&Path>) -> Value {
     let python = match interpreter {
         Some(path) => json!({ "pythonPath": path.to_string_lossy() }),
         None => json!({}),
     };
+    let mut analysis = json!({ "typeCheckingMode": "standard", "diagnosticMode": "openFilesOnly" });
+    if let Some(library) = library {
+        analysis["extraPaths"] = json!([library.to_string_lossy()]);
+    }
     json!({
         "python": python,
-        "basedpyright": {
-            "analysis": { "typeCheckingMode": "standard", "diagnosticMode": "openFilesOnly" }
-        },
+        "basedpyright": { "analysis": analysis },
     })
 }
 
-// basedpyright を dir で、projects の Python のパッケージを扱うように動かす。interpreter は設定の処理系
+// basedpyright を dir で、projects の Python のパッケージを扱うように動かす。interpreter は設定の処理系、
+// library は自作のライブラリのフォルダ（D-252）
 pub fn basedpyright(
     dir: PathBuf,
     projects: Vec<PathBuf>,
     interpreter: Option<&Path>,
+    library: Option<&Path>,
 ) -> Result<Launch, String> {
     let program = find_basedpyright()?;
     let mut command = Command::new(program);
@@ -795,7 +800,7 @@ pub fn basedpyright(
         dir,
         projects,
         options: Value::Null,
-        configuration: basedpyright_configuration(interpreter),
+        configuration: basedpyright_configuration(interpreter, library),
     })
 }
 
@@ -1088,7 +1093,7 @@ mod tests {
             "jsonrpc": "2.0", "id": 9, "method": "workspace/configuration",
             "params": { "items": [{ "section": "python" }, { "section": "basedpyright" }, { "section": "pyright" }, {}] }
         });
-        let configuration = basedpyright_configuration(Some(Path::new("/opt/x/python3.13")));
+        let configuration = basedpyright_configuration(Some(Path::new("/opt/x/python3.13")), None);
         let answer = configuration_answer(&request, &configuration);
         assert_eq!(answer["result"][0]["pythonPath"], "/opt/x/python3.13");
         assert_eq!(
@@ -1101,8 +1106,15 @@ mod tests {
         );
         assert_eq!(answer["result"][2], Value::Null);
         assert_eq!(answer["result"][3], Value::Null);
+        // 自作のライブラリのフォルダがなければ extraPaths は渡さない（D-252）
+        assert_eq!(answer["result"][1]["analysis"]["extraPaths"], Value::Null);
         // 処理系が見つからなければ渡さない
-        assert_eq!(basedpyright_configuration(None)["python"], json!({}));
+        assert_eq!(basedpyright_configuration(None, None)["python"], json!({}));
+        assert_eq!(
+            basedpyright_configuration(None, Some(Path::new("/app/libraries/python")))["basedpyright"]
+                ["analysis"]["extraPaths"],
+            json!(["/app/libraries/python"])
+        );
     }
 
     #[test]
@@ -1932,7 +1944,7 @@ mod tests {
             .to_string();
         let path = path_of_uri(&target).unwrap().canonicalize().unwrap();
         assert!(path.to_string_lossy().contains("/include/c++/"), "{target}");
-        let headers = crate::cpp::header_dirs(&compiler, None);
+        let headers = crate::cpp::header_dirs(&compiler, &[]);
         assert!(
             headers.iter().any(|dir| path.starts_with(dir)),
             "{path:?} {headers:?}"
@@ -1973,10 +1985,17 @@ mod tests {
         let root = temp_dir("basedpyright-real");
         let package = root.join("abc480/abc480_a");
         std::fs::create_dir_all(&package).unwrap();
-        let source = "import sys\nfrom collections import deque\n\n\ndef main():\n    n = int(input())\n    q = deque()\n    print(n + \"a\")\n\n\nmain()\n";
+        let source = "import sys\nfrom collections import deque\n\n\ndef main():\n    n = int(input())\n    q = deque()\n    print(n + \"a\")\n\n\nmain()\nfrom mylib import twice\ntwice(1)\n";
         std::fs::write(package.join("main.py"), source).unwrap();
+        // 自作のライブラリのフォルダ（D-252）。作業領域の外に置く
+        let library = temp_dir("basedpyright-library");
+        std::fs::write(
+            library.join("mylib.py"),
+            "def twice(x: int) -> int:\n    return 2 * x\n",
+        )
+        .unwrap();
         let (dir, projects) = basedpyright_place(&root, &package);
-        let launch = basedpyright(dir, projects, Some(&interpreter)).unwrap();
+        let launch = basedpyright(dir, projects, Some(&interpreter), Some(&library)).unwrap();
         let control = LspControl::default();
         let (sink, events) = collector();
         assert!(
@@ -2013,14 +2032,21 @@ mod tests {
         message(json!({ "jsonrpc": "2.0", "id": 2, "method": "textDocument/definition", "params": { "textDocument": { "uri": uri }, "position": { "line": 6, "character": 9 } } }).to_string());
         message(json!({ "jsonrpc": "2.0", "id": 3, "method": "textDocument/documentSymbol", "params": { "textDocument": { "uri": uri } } }).to_string());
         message(json!({ "jsonrpc": "2.0", "id": 4, "method": "textDocument/inlayHint", "params": { "textDocument": { "uri": uri }, "range": { "start": { "line": 0, "character": 0 }, "end": { "line": 11, "character": 0 } } } }).to_string());
+        message(json!({ "jsonrpc": "2.0", "id": 5, "method": "textDocument/definition", "params": { "textDocument": { "uri": uri }, "position": { "line": 12, "character": 1 } } }).to_string());
         let mut definition = None;
         let mut symbols = None;
         let mut hints = None;
+        let mut library_definition = None;
         for _ in 0..1500 {
             definition = find(&|m| m["id"] == 2);
             symbols = find(&|m| m["id"] == 3);
             hints = find(&|m| m["id"] == 4);
-            if definition.is_some() && symbols.is_some() && hints.is_some() {
+            library_definition = find(&|m| m["id"] == 5);
+            if definition.is_some()
+                && symbols.is_some()
+                && hints.is_some()
+                && library_definition.is_some()
+            {
                 break;
             }
             thread::sleep(Duration::from_millis(20));
@@ -2060,6 +2086,20 @@ mod tests {
                 .content
                 .contains("class deque")
         );
+        // 自作のライブラリの関数の定義は libraries/python/ の中にあり、読み取り専用で開ける（D-252）
+        let target =
+            library_definition.expect("ライブラリの定義の答えが届かない")["result"][0]["uri"]
+                .as_str()
+                .unwrap()
+                .to_string();
+        let path = path_of_uri(&target).unwrap().canonicalize().unwrap();
+        assert_eq!(path, library.join("mylib.py"));
+        assert!(
+            crate::sources::read_source(&target, &[], std::slice::from_ref(&library))
+                .unwrap()
+                .content
+                .contains("def twice")
+        );
         // 記号は入れ子の形。main の中に n・q
         let symbols = symbols.expect("記号の答えが届かない")["result"].clone();
         assert_eq!(symbols[0]["name"], "main", "{symbols}");
@@ -2085,5 +2125,6 @@ mod tests {
         assert_eq!(names(&package), ["main.py"]);
         assert_eq!(names(&root.join("abc480")), ["abc480_a"]);
         let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&library);
     }
 }
