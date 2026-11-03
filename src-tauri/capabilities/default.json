@@ -70,6 +70,7 @@
     "allow-atcoder-submit",
     "allow-atcoder-submissions",
     "allow-contest-status",
+    "allow-contest-standings",
     "allow-contest-period",
     "allow-watch-contest-start",
     "allow-atcoder-refresh-submission",

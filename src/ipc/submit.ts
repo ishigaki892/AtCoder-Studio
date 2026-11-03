@@ -147,10 +147,60 @@ export type StandingsSummary = {
   note: string | null;
 };
 
+// 追跡の表（Phase 31。D-253。Rust 側は standings.rs の FollowTable）
+export type FollowTask = {
+  task: string;
+  // 列の見出し（A・B…）
+  label: string;
+};
+
+export type FollowCell = {
+  // 得点
+  score: number;
+  // 得点がある（AC。部分点を含む）
+  accepted: boolean;
+  // 得点を取った時刻（開始からの秒）。得点がなければ null
+  elapsedSecs: number | null;
+  // 得点を取るまでの誤答の数
+  penalty: number;
+  // 判定を受けた提出の数（得点がないときは、誤答の数）
+  failure: number;
+  // 提出の数
+  count: number;
+  pending: boolean;
+};
+
+export type FollowRow = {
+  user: string;
+  me: boolean;
+  // 順位表に行がない（参加していない・ID の誤り）
+  missing: boolean;
+  rank: number | null;
+  // レート（0 なら null）
+  rating: number | null;
+  isRated: boolean;
+  submitted: boolean;
+  score: number;
+  // 時間（開始からの秒。ペナルティの時間を含む）
+  elapsedSecs: number;
+  penalty: number;
+  // tasks と同じ順。出していない問題は null
+  cells: (FollowCell | null)[];
+};
+
+export type FollowTable = {
+  fixed: boolean;
+  tasks: FollowTask[];
+  // 自分（分かれば一番上）、次に設定の順
+  rows: FollowRow[];
+};
+
 export type StandingsOutcome =
-  | { kind: "read"; summary: StandingsSummary }
+  | { kind: "read"; summary: StandingsSummary; follow: FollowTable }
   // 始まる前（順位表は読まない）
   | { kind: "notStarted" }
+  // ログインしていない（「追跡」の「更新」のとき）
+  | { kind: "notLoggedIn" }
   | { kind: "failed"; message: string };
 
 export type ContestStatus = {
@@ -161,8 +211,10 @@ export type ContestStatus = {
   // 上限のページまで読んでも続きがあった
   truncated: boolean;
   pages: number;
-  // 順位・予想パフォーマンス・予想 diff（Phase 21。D-230）。読めなくても、提出状況は出る
+  // 順位・予想パフォーマンス・予想 diff（Phase 21。D-230）と追跡の表（D-253）。読めなくても、提出状況は出る
   standings: StandingsOutcome;
+  // 「自分の提出」のページから分かった、ログインしているユーザー
+  user: string | null;
 };
 
 export type StatusOutcome =
@@ -173,6 +225,11 @@ export type StatusOutcome =
 // 「自分の提出」のページを読み、問題ごとに数える。続けて順位表を読み、順位・予想 perf・予想 diff を計算する（D-230）
 export function contestStatus(contest: string): Promise<StatusOutcome> {
   return invoke<StatusOutcome>("contest_status", { contest });
+}
+
+// 右下の「追跡」の「更新」（Phase 31。D-253）：順位表だけを読み、自分と追跡するユーザーの行を取り出す
+export function contestStandings(contest: string): Promise<StandingsOutcome> {
+  return invoke<StandingsOutcome>("contest_standings", { contest });
 }
 
 // コンテストの開始・終了の時刻（UNIX 時間の秒。Phase 22 作業 1。D-238）。

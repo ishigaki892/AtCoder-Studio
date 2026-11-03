@@ -25,6 +25,7 @@ import {
   reloadSettings,
   saveAppState,
   DEFAULT_ATCODER_PROBLEMS_SETTINGS,
+  DEFAULT_STANDINGS_SETTINGS,
   DEFAULT_NOTIFY_SETTINGS,
   DEFAULT_PROBLEM_SETTINGS,
   DEFAULT_PYTHON_SETTINGS,
@@ -36,6 +37,7 @@ import {
   type SubmitSettings,
   type NotifySettings,
   type AtcoderProblemsSettings,
+  type StandingsSettings,
 } from "./ipc/state";
 import SettingsDialog from "./settings/SettingsDialog";
 import SettingsEditor from "./settings/SettingsEditor";
@@ -127,7 +129,8 @@ import DebugPanel from "./panels/DebugPanel";
 import { useDebug } from "./panels/useDebug";
 import { debugEvaluate } from "./ipc/debug";
 import { appendConsole, consoleKindOf, type ConsoleEntry, type ConsoleKind } from "./panels/debugView";
-import BottomRightPanel from "./panels/BottomRightPanel";
+import BottomRightPanel, { type BottomRightTab } from "./panels/BottomRightPanel";
+import FollowPanel, { followEntryAfter, type FollowEntry } from "./panels/FollowPanel";
 import SubmissionPanel, { upsertSubmission, type SubmitNotice } from "./panels/SubmissionPanel";
 import { copyText } from "./panels/copyText";
 import { copySource } from "./ipc/scaffold";
@@ -137,12 +140,14 @@ import {
   atcoderSession,
   atcoderSubmissions,
   atcoderSubmit,
+  contestStandings,
   onSession,
   onSubmission,
   openSubmissionPage,
   openSubmitPage,
   refreshSubmission,
   type SessionView,
+  type StandingsOutcome,
   type SubmissionView,
 } from "./ipc/submit";
 
@@ -376,6 +381,12 @@ function App() {
   const [atcoderProblemsSettings, setAtcoderProblemsSettings] = useState<AtcoderProblemsSettings>(
     DEFAULT_ATCODER_PROBLEMS_SETTINGS,
   );
+  // 順位表の設定（追跡するユーザー。Phase 31。D-253）。設定の画面に使う。表を作るときは Rust 側が読み直す
+  const [standingsSettings, setStandingsSettings] = useState<StandingsSettings>(DEFAULT_STANDINGS_SETTINGS);
+  // 右下パネルのタブ（Phase 31。D-253）と、「追跡」のコンテストごとの表（保存しない）
+  const [bottomRightTab, setBottomRightTab] = useState<BottomRightTab>("submissions");
+  const [followEntries, setFollowEntries] = useState<Record<string, FollowEntry>>({});
+  const [followLoading, setFollowLoading] = useState(false);
   // 問題文の欄の設定（Phase 15 作業 3。D-196・D-197）
   const [problemSettings, setProblemSettings] = useState<ProblemSettings>(DEFAULT_PROBLEM_SETTINGS);
   // Python の設定（Phase 19 作業 3。D-221）。設定の画面に使う。動かすときは Rust 側が読み直す
@@ -754,10 +765,35 @@ function App() {
     }
   }
 
-  // 「提出結果」を出す（右列・右下パネルを閉じていれば開く。右下は提出結果だけ。D-182）
+  // 「提出結果」を出す（右列・右下パネルを閉じていれば開き、「追跡」を出していれば「提出結果」に切り替える。D-182・D-253）
   function showSubmissions() {
     setRightColumn((current) => ({ ...current, visible: true }));
     setBottomRightPanel((current) => ({ ...current, visible: true }));
+    setBottomRightTab("submissions");
+  }
+
+  // 順位表を読んだ結果で、「追跡」の表を新しくする（右下の「更新」と、サイドバーの「コンテスト」の読み。D-253）
+  function applyStandings(contest: string, outcome: StandingsOutcome) {
+    setFollowEntries((entries) => ({
+      ...entries,
+      [contest]: followEntryAfter(entries[contest], outcome, Date.now()),
+    }));
+  }
+
+  // 「追跡」の「更新」：順位表だけを読む
+  async function refreshFollow() {
+    const contest = currentProblem?.contest;
+    if (!contest || followLoading) {
+      return;
+    }
+    setFollowLoading(true);
+    try {
+      applyStandings(contest, await contestStandings(contest));
+    } catch (e) {
+      applyStandings(contest, { kind: "failed", message: String(e) });
+    } finally {
+      setFollowLoading(false);
+    }
   }
 
   // 「提出」ボタン・ショートカット（D-148 §2.2〜§2.5）。未保存のタブを保存してから（D-089）、Rust 側に頼む。
@@ -1130,6 +1166,7 @@ function App() {
         setSubmitSettings(startup.settings.submit);
         setNotifySettings(startup.settings.notify);
         setAtcoderProblemsSettings(startup.settings.atcoderProblems);
+        setStandingsSettings(startup.settings.standings);
         setProblemSettings(startup.settings.problem);
         setPythonSettings(startup.settings.python);
         if (settingsProblem) {
@@ -1401,11 +1438,13 @@ function App() {
     atcoderProblems: AtcoderProblemsSettings,
     problem: ProblemSettings,
     interpreter: Interpreter,
+    standings: StandingsSettings,
   ) {
     setAppearance(saved);
     setSubmitSettings(submit);
     setNotifySettings(notify);
     setAtcoderProblemsSettings(atcoderProblems);
+    setStandingsSettings(standings);
     setProblemSettings(problem);
     setPythonSettings((current) => ({ ...current, interpreter }));
     // settings.json のタブを開いていれば、新しい中身に読み直す（未保存の編集があれば、そのまま。保存のときに外での変更として聞く）
@@ -1581,6 +1620,7 @@ function App() {
         setSubmitSettings(settings.submit);
         setNotifySettings(settings.notify);
         setAtcoderProblemsSettings(settings.atcoderProblems);
+        setStandingsSettings(settings.standings);
         setProblemSettings(settings.problem);
         setPythonSettings(settings.python);
         setSettingsSeq((seq) => seq + 1);
@@ -1856,6 +1896,7 @@ function App() {
               onSelectTask={(id) => void openContestTask(id)}
               onLogin={() => void handleLogin()}
               onOpenPast={() => openExtra("past")}
+              onStandings={applyStandings}
             />
           </PaneBoundary>
         </div>
@@ -1962,6 +2003,7 @@ function App() {
               submit={submitSettings}
               notify={notifySettings}
               atcoderProblems={atcoderProblemsSettings}
+              standings={standingsSettings}
               problem={problemSettings}
               python={pythonSettings}
               resetSeq={settingsSeq}
@@ -2079,15 +2121,29 @@ function App() {
             dragPanel(rightColumnRef.current, clientY, setBottomRightPanel)
           }
         />
-        {/* 右下パネル：「提出結果」（Phase 6 作業 3。D-148 §2.7）だけ。デバッグ情報はサイドバーに置く（Phase 12 作業 1。D-182） */}
+        {/* 右下パネル：「提出結果」（Phase 6 作業 3。D-148 §2.7）と「追跡」（Phase 31。D-253）。デバッグ情報はサイドバーに置く（Phase 12 作業 1。D-182） */}
         <section
           className="bottom-right-panel"
           hidden={!bottomRightPanel.visible}
           style={{ flexGrow: bottomRightPanel.ratio }}
         >
           <PaneBoundary name="右下パネル">
-          <BottomRightPanel judging={submissions.some((submission) => submission.tracking)}>
-            <div className="right-panel-body">
+          <BottomRightPanel
+            tab={bottomRightTab}
+            onTab={setBottomRightTab}
+            judging={submissions.some((submission) => submission.tracking)}
+          >
+            <div className="right-panel-body" hidden={bottomRightTab !== "follow"}>
+              <FollowPanel
+                contest={currentProblem?.contest ?? null}
+                entry={currentProblem ? (followEntries[currentProblem.contest] ?? null) : null}
+                loggedIn={session?.loggedIn ?? false}
+                loading={followLoading}
+                onRefresh={() => void refreshFollow()}
+                onLogin={() => void handleLogin()}
+              />
+            </div>
+            <div className="right-panel-body" hidden={bottomRightTab !== "submissions"}>
               <SubmissionPanel
                 session={session}
                 submissions={submissions}
@@ -2111,6 +2167,7 @@ function App() {
           submit={submitSettings}
           notify={notifySettings}
           atcoderProblems={atcoderProblemsSettings}
+          standings={standingsSettings}
           problem={problemSettings}
           python={pythonSettings}
           resetSeq={settingsSeq}

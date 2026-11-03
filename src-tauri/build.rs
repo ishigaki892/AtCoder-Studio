@@ -67,6 +67,7 @@ fn main() {
             "atcoder_submit",
             "atcoder_submissions",
             "contest_status",
+            "contest_standings",
             "contest_period",
             "watch_contest_start",
             "atcoder_refresh_submission",

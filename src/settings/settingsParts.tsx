@@ -438,3 +438,40 @@ export function SizeField({ label, size, onChange }: { label: string; size: numb
   );
 }
 
+
+// 追跡するユーザー（Phase 31。D-253。settings.json の standings.follow）。1 行に 1 人。
+// 書いている途中の行もそのまま持ち、保存のときに Rust 側が確かめる（形が正しくない ID があれば保存しない）
+export const MAX_FOLLOW = 30;
+
+const FOLLOW_ID = /^[A-Za-z0-9_]{1,16}$/;
+
+export const FOLLOW_NOTE =
+  "右下の「追跡」のタブで、問題文の欄の問題のコンテストの順位表から、自分とこのユーザーの順位・得点・問題ごとの結果を出します。1 行に 1 人、30 人まで。ID は AtCoder に送らず、読んだ順位表から手元で取り出します。";
+
+export function FollowUsersField({ follow, onChange }: { follow: string[]; onChange: (follow: string[]) => void }) {
+  const users = follow.map((line) => line.trim()).filter((line) => line !== "");
+  const invalid = users.filter((user) => !FOLLOW_ID.test(user));
+  const count = new Set(users.filter((user) => FOLLOW_ID.test(user)).map((user) => user.toLowerCase())).size;
+  return (
+    <>
+      <textarea
+        className="settings-textarea"
+        value={follow.join("\n")}
+        rows={6}
+        placeholder={"1 行に 1 人（例：chokudai）"}
+        spellCheck={false}
+        onChange={(event) => onChange(event.target.value.split("\n"))}
+      />
+      {invalid.length > 0 && (
+        <p className="settings-warning">
+          形が正しくない ID があるので、保存できません（英数字と _、16 文字まで）：{invalid.join("・")}
+        </p>
+      )}
+      {count > MAX_FOLLOW && (
+        <p className="settings-warning">
+          {MAX_FOLLOW} 人までにしてください（今は {count} 人）
+        </p>
+      )}
+    </>
+  );
+}

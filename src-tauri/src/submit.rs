@@ -404,12 +404,19 @@ pub fn prepare(
             Vec::new(),
         ),
     };
-    // 入れたライブラリの依存には「パスの依存」の注意を出さない。ライブラリが使う依存も、ジャッジにあるかを確かめる
+    // 入れたライブラリの依存には「パスの依存」の注意を出さない。ライブラリが使う依存も、ジャッジにあるかを確かめる。
+    // libraries/rust/ の中のライブラリは、main で使っていない（入れない）ものにも注意を出さない（テンプレートの
+    // dependencies.toml で全部の問題に書いても、確認のダイアログを省けるように。D-251）
     let lock = std::fs::read_to_string(metadata.workspace_root.join("Cargo.lock")).ok();
     let own: Vec<MetaDependency> = package
         .dependencies
         .iter()
         .filter(|dependency| !bundled_names.contains(&dependency.name))
+        .filter(|dependency| {
+            !libraries
+                .root
+                .is_some_and(|root| crate::rust_bundle::in_library(dependency, root))
+        })
         .cloned()
         .collect();
     for warning in crate_warnings(&own, lock.as_deref())
@@ -2157,8 +2164,10 @@ pub struct ContestStatus {
     // 上限のページまで読んでも続きがあった（新しいものだけを数えた）
     pub truncated: bool,
     pub pages: u32,
-    // 順位・予想パフォーマンス・予想 diff（Phase 21。D-230）。読めなくても、提出状況は出す
+    // 順位・予想パフォーマンス・予想 diff（Phase 21。D-230）と追跡の表（Phase 31。D-253）。読めなくても、提出状況は出す
     pub standings: crate::standings::StandingsOutcome,
+    // 「自分の提出」のページから分かった、ログインしているユーザー（分からなければ None）
+    pub user: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -2168,7 +2177,7 @@ pub struct ContestStatus {
     tag = "kind"
 )]
 pub enum StatusOutcome {
-    Read { status: ContestStatus },
+    Read { status: Box<ContestStatus> },
     // ログインしていない（Keychain にない、ログインのページへ移された）
     NotLoggedIn,
     Failed { message: String },
@@ -2314,8 +2323,14 @@ pub fn contest_period(
 
 // 順位表を読んで、順位・予想パフォーマンス・予想 diff を計算する（Phase 21。D-230〜D-233）。
 // Rated の範囲と開催期間は、ログインなしで読めるコンテストのページから（アプリを開いている間は覚えておく）。
-// 始まる前は順位表を読まない。順位表の中身はメモリの中だけで使う
-fn read_standings(remote: &Remote, contest: &str, user: Option<&str>) -> StandingsOutcome {
+// 始まる前は順位表を読まない。順位表の中身はメモリの中だけで使う。
+// 自分（user）と追跡するユーザー（follow）の行も取り出す（Phase 31。D-253）
+fn read_standings(
+    remote: &Remote,
+    contest: &str,
+    user: Option<&str>,
+    follow: &[String],
+) -> StandingsOutcome {
     let info = match read_contest_info(remote, contest) {
         Ok(info) => info,
         Err(message) => return StandingsOutcome::Failed { message },
@@ -2325,6 +2340,7 @@ fn read_standings(remote: &Remote, contest: &str, user: Option<&str>) -> Standin
     }
     let reply = match remote.get_compressed(&format!("/contests/{contest}/standings/json")) {
         Ok(reply) => reply,
+        Err(message) if message == NOT_LOGGED_IN => return StandingsOutcome::NotLoggedIn,
         Err(message) => return StandingsOutcome::Failed { message },
     };
     if reply.status != 200 {
@@ -2335,13 +2351,38 @@ fn read_standings(remote: &Remote, contest: &str, user: Option<&str>) -> Standin
     match crate::standings::parse_standings(&reply.body) {
         Ok(data) => StandingsOutcome::Read {
             summary: crate::standings::summarize(&data, user, info.kind, info.start),
+            follow: crate::standings::follow_table(&data, user, follow),
         },
         Err(message) => StandingsOutcome::Failed { message },
     }
 }
 
-// コンテストの提出状況（サイドバーの「コンテスト」）。問題の一覧は覚えてあるもの（なければ読む）
-pub fn contest_status(remote: &Remote, app_dir: &Path, contest: &str) -> StatusOutcome {
+// 右下の「追跡」の「更新」（Phase 31。D-253）：順位表だけを読む（「自分の提出」は読まない）。
+// user はログインしているユーザー（分からなければ None で、自分の行は出さない）
+pub fn contest_standings(
+    remote: &Remote,
+    contest: &str,
+    user: Option<&str>,
+    follow: &[String],
+) -> StandingsOutcome {
+    if let Err(message) = crate::problem::ProblemId::new(contest, "x") {
+        return StandingsOutcome::Failed { message };
+    }
+    match remote.logged_in() {
+        Ok(true) => read_standings(remote, contest, user, follow),
+        Ok(false) => StandingsOutcome::NotLoggedIn,
+        Err(message) => StandingsOutcome::Failed { message },
+    }
+}
+
+// コンテストの提出状況（サイドバーの「コンテスト」）。問題の一覧は覚えてあるもの（なければ読む）。
+// follow は追跡するユーザー（順位表から行を取り出す。D-253）
+pub fn contest_status(
+    remote: &Remote,
+    app_dir: &Path,
+    contest: &str,
+    follow: &[String],
+) -> StatusOutcome {
     if let Err(message) = crate::problem::ProblemId::new(contest, "x") {
         return StatusOutcome::Failed { message };
     }
@@ -2356,14 +2397,15 @@ pub fn contest_status(remote: &Remote, app_dir: &Path, contest: &str) -> StatusO
     };
     match read_mine(remote, contest) {
         Ok(mine) => StatusOutcome::Read {
-            status: ContestStatus {
+            status: Box::new(ContestStatus {
                 contest: contest.to_string(),
                 tasks: summarize(&tasks, &mine.rows),
                 read_at_ms: now_ms(),
                 truncated: mine.truncated,
                 pages: mine.pages,
-                standings: read_standings(remote, contest, mine.user.as_deref()),
-            },
+                standings: read_standings(remote, contest, mine.user.as_deref(), follow),
+                user: mine.user,
+            }),
         },
         Err(message) if message == NOT_LOGGED_IN => StatusOutcome::NotLoggedIn,
         Err(message) => StatusOutcome::Failed { message },
@@ -3871,6 +3913,40 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(error, "ビルドのエラー");
+        // main で使っていないライブラリ（テンプレートで全部の問題に書いたものなど）は、入れず、注意も出さない
+        // （注意があると、確認のダイアログを省けない。D-162・D-251）
+        std::fs::write(base.join("ws/pkg/src/main.rs"), "fn main() {}\n").unwrap();
+        let unused = prepare(
+            &root,
+            &dir,
+            &metadata,
+            "pkg",
+            "abc480_a",
+            &libraries,
+            |_| panic!("入れたものがないので、確かめない"),
+        )
+        .unwrap();
+        assert!(unused.expanded.is_empty());
+        assert!(unused.warnings.is_empty(), "{:?}", unused.warnings);
+        // ライブラリの場所を渡さなければ、今までどおりパスの依存の注意を出す
+        let outside = prepare(
+            &root,
+            &dir,
+            &metadata,
+            "pkg",
+            "abc480_a",
+            &NO_RUST_LIBRARIES,
+            |_| panic!("入れたものがないので、確かめない"),
+        )
+        .unwrap();
+        assert!(
+            outside
+                .warnings
+                .join("\n")
+                .contains("クレート「mylib」は crates.io ではなく"),
+            "{:?}",
+            outside.warnings
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -4280,7 +4356,8 @@ mod tests {
                 _ => not_found(),
             }
         }));
-        let StatusOutcome::Read { status } = contest_status(&remote(&keychain, &base), &dir, "x")
+        let StatusOutcome::Read { status } =
+            contest_status(&remote(&keychain, &base), &dir, "x", &[])
         else {
             panic!("読めるはず");
         };
@@ -4334,7 +4411,8 @@ mod tests {
                 Some(page as u32 + 1),
             ))
         }));
-        let StatusOutcome::Read { status } = contest_status(&remote(&keychain, &base), &dir, "x")
+        let StatusOutcome::Read { status } =
+            contest_status(&remote(&keychain, &base), &dir, "x", &[])
         else {
             panic!("読めるはず");
         };
@@ -4354,14 +4432,14 @@ mod tests {
             redirect("/login?continue=x", None)
         }));
         assert_eq!(
-            contest_status(&remote(&keychain, &base), &dir, "x"),
+            contest_status(&remote(&keychain, &base), &dir, "x", &[]),
             StatusOutcome::NotLoggedIn
         );
         assert!(seen.lock().unwrap().is_empty());
         // ログインのページへ移された
         keychain.0.save("expired").unwrap();
         assert_eq!(
-            contest_status(&remote(&keychain, &base), &dir, "x"),
+            contest_status(&remote(&keychain, &base), &dir, "x", &[]),
             StatusOutcome::NotLoggedIn
         );
         // 読めない（404）
@@ -4369,7 +4447,7 @@ mod tests {
         keychain.0.save("session").unwrap();
         let (base, _) = fake(Arc::new(|_: &Request, _| not_found()));
         let StatusOutcome::Failed { message } =
-            contest_status(&remote(&keychain, &base), &dir, "x")
+            contest_status(&remote(&keychain, &base), &dir, "x", &[])
         else {
             panic!("失敗するはず");
         };
@@ -4377,7 +4455,7 @@ mod tests {
         // コンテスト ID の形が違えば、読みに行かない
         let (base, seen) = fake(Arc::new(|_: &Request, _| not_found()));
         assert!(matches!(
-            contest_status(&remote(&keychain, &base), &dir, "../x"),
+            contest_status(&remote(&keychain, &base), &dir, "../x", &[]),
             StatusOutcome::Failed { .. }
         ));
         assert!(seen.lock().unwrap().is_empty());
@@ -4429,13 +4507,30 @@ mod tests {
                 _ => not_found(),
             }
         }));
-        let StatusOutcome::Read { status } = contest_status(&remote(&keychain, &base), &dir, "y")
+        let follow = ["third".to_string(), "ghost".to_string()];
+        let StatusOutcome::Read { status } =
+            contest_status(&remote(&keychain, &base), &dir, "y", &follow)
         else {
             panic!("読めるはず");
         };
-        let crate::standings::StandingsOutcome::Read { summary } = &status.standings else {
+        let crate::standings::StandingsOutcome::Read { summary, follow } = &status.standings else {
             panic!("順位表を読めるはず：{:?}", status.standings);
         };
+        assert_eq!(status.user.as_deref(), Some("me"));
+        // 追跡の表：自分、次に設定の順（順位表にいない人も行を出す）
+        let rows: Vec<(&str, bool, Option<i64>)> = follow
+            .rows
+            .iter()
+            .map(|row| (row.user.as_str(), row.missing, row.rank))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ("me", false, Some(2)),
+                ("third", false, Some(3)),
+                ("ghost", true, None)
+            ]
+        );
         // 1 ページ目のユーザー名で自分の行を探す
         let place = summary.place.as_ref().unwrap();
         assert_eq!((place.rank, place.rated_rank), (2, 2.0));
@@ -4528,7 +4623,8 @@ mod tests {
                 _ => not_found(),
             }
         }));
-        let StatusOutcome::Read { status } = contest_status(&remote(&keychain, &base), &dir, "z")
+        let StatusOutcome::Read { status } =
+            contest_status(&remote(&keychain, &base), &dir, "z", &[])
         else {
             panic!("読めるはず");
         };
@@ -4538,6 +4634,64 @@ mod tests {
         );
         assert_eq!(seen.lock().unwrap().len(), 2);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // 右下の「追跡」の「更新」：コンテストのページ（セッションなし）と順位表だけを読み、「自分の提出」は読まない（D-253）
+    #[test]
+    fn reads_only_the_standings_for_the_follow_tab() {
+        let keychain = TestKeychain::new("follow-standings");
+        keychain.0.save("session").unwrap();
+        let now = now_secs();
+        let (base, seen) = fake(Arc::new(move |request: &Request, _| {
+            match request.target.as_str() {
+                "/contests/w" => ok(&format!(
+                    "{}<span class=\"mr-2\">Rated対象:  ~ 1999</span>",
+                    top_page(now - 600, now + 600)
+                )),
+                "/contests/w/standings/json" => ok(&standings_json().replace("y_a", "w_a")),
+                _ => not_found(),
+            }
+        }));
+        let follow = ["first".to_string()];
+        let crate::standings::StandingsOutcome::Read { follow, .. } =
+            contest_standings(&remote(&keychain, &base), "w", Some("me"), &follow)
+        else {
+            panic!("読めるはず");
+        };
+        let rows: Vec<&str> = follow.rows.iter().map(|row| row.user.as_str()).collect();
+        assert_eq!(rows, ["me", "first"]);
+        assert_eq!(follow.tasks[0].task, "w_a");
+        let targets: Vec<String> = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|r| r.target.clone())
+            .collect();
+        assert_eq!(targets, ["/contests/w", "/contests/w/standings/json"]);
+        // ログインのページへ移されたら NotLoggedIn
+        let (base, _) = fake(Arc::new(|request: &Request, _| {
+            if request.target == "/contests/w/standings/json" {
+                redirect("/login?continue=x", None)
+            } else {
+                not_found()
+            }
+        }));
+        assert_eq!(
+            contest_standings(&remote(&keychain, &base), "w", None, &[]),
+            crate::standings::StandingsOutcome::NotLoggedIn
+        );
+        // Keychain にない・ID の形が違う：読みに行かない
+        let keychain = TestKeychain::new("follow-nologin");
+        let (base, seen) = fake(Arc::new(|_: &Request, _| not_found()));
+        assert_eq!(
+            contest_standings(&remote(&keychain, &base), "w", None, &[]),
+            crate::standings::StandingsOutcome::NotLoggedIn
+        );
+        assert!(matches!(
+            contest_standings(&remote(&keychain, &base), "../w", None, &[]),
+            crate::standings::StandingsOutcome::Failed { .. }
+        ));
+        assert!(seen.lock().unwrap().is_empty());
     }
 
     // dir の中のファイル（dir からの相対パス。並べて返す）

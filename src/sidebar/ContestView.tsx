@@ -10,6 +10,7 @@ import {
   contestStatus,
   openSubmissionPage,
   type ContestStatus,
+  type StandingsOutcome,
   type StandingsSummary,
   type SubmissionView,
 } from "../ipc/submit";
@@ -34,6 +35,8 @@ type Props = {
   onLogin: () => void;
   // 中央の「過去問」のタブを開く（Phase 24。D-242）
   onOpenPast: () => void;
+  // 順位表を読んだ（右下の「追跡」の表にも使う。Phase 31。D-253）
+  onStandings: (contest: string, standings: StandingsOutcome) => void;
 };
 
 type Entry = {
@@ -78,6 +81,7 @@ function ContestView({
   onSelectTask,
   onLogin,
   onOpenPast,
+  onStandings,
 }: Props) {
   const [entry, setEntry] = useState<Entry | null>(null);
   const [loading, setLoading] = useState(false);
@@ -96,6 +100,7 @@ function ContestView({
       const outcome = await contestStatus(target);
       if (outcome.kind === "read") {
         const standings = outcome.status.standings;
+        onStandings(target, standings);
         next = {
           status: outcome.status,
           error: null,
@@ -105,7 +110,9 @@ function ContestView({
             ? { standings: standings.summary, standingsMessage: null }
             : standings.kind === "notStarted"
               ? { standings: null, standingsMessage: "始まる前なので、順位表は読みません" }
-              : { standings: kept.standings, standingsMessage: `順位表を読めませんでした：${standings.message}` }),
+              : standings.kind === "notLoggedIn"
+                ? { standings: kept.standings, standingsMessage: "ログインしていないので、順位表を読めませんでした" }
+                : { standings: kept.standings, standingsMessage: `順位表を読めませんでした：${standings.message}` }),
         };
       } else if (outcome.kind === "notLoggedIn") {
         next = { status: previous, error: null, notLoggedIn: true, triedAt: Date.now(), ...kept };

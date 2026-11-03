@@ -236,6 +236,69 @@ pub fn atcoder_problems_settings(dir: &Path) -> AtcoderProblemsSettings {
     }
 }
 
+// settings.json の順位表の設定（Phase 31。D-253）。follow は追跡するユーザーの AtCoder の ID（設定の順。同じ ID は 1 つ）
+pub const MAX_FOLLOW: usize = 30;
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StandingsSettings {
+    pub follow: Vec<String>,
+}
+
+// 正しくない ID・31 人目からは使わずに知らせる。空の文字列は飛ばす。大文字・小文字だけが違う ID は 1 つにまとめる
+fn parse_standings_settings(value: &Value, problems: &mut Vec<String>) -> StandingsSettings {
+    let mut settings = StandingsSettings::default();
+    let Some(section) = section(value, "standings", problems) else {
+        return settings;
+    };
+    let items = match section.get("follow") {
+        None => return settings,
+        Some(Value::Array(items)) => items,
+        Some(_) => {
+            problems.push("standings.follow（AtCoder の ID の一覧にしてください）".to_string());
+            return settings;
+        }
+    };
+    let mut invalid = Vec::new();
+    for item in items {
+        match item.as_str().map(str::trim) {
+            Some("") => {}
+            Some(user) if crate::atcoder_problems::valid_user(user) => {
+                if !settings
+                    .follow
+                    .iter()
+                    .any(|known| known.eq_ignore_ascii_case(user))
+                {
+                    settings.follow.push(user.to_string());
+                }
+            }
+            _ => invalid.push(item.to_string()),
+        }
+    }
+    if !invalid.is_empty() {
+        problems.push(format!(
+            "standings.follow の {}（AtCoder の ID〔英数字と _、16 文字まで〕にしてください）",
+            invalid.join("・")
+        ));
+    }
+    if settings.follow.len() > MAX_FOLLOW {
+        settings.follow.truncate(MAX_FOLLOW);
+        problems.push(format!(
+            "standings.follow（{MAX_FOLLOW} 人までにしてください。{} 人目からは使いません）",
+            MAX_FOLLOW + 1
+        ));
+    }
+    settings
+}
+
+// 追跡の表を作るときに読む（D-253）。読めない・ないときは既定（だれも追跡しない）
+pub fn standings_settings(dir: &Path) -> StandingsSettings {
+    match reread_settings(dir) {
+        Ok(Some(loaded)) => loaded.standings,
+        _ => StandingsSettings::default(),
+    }
+}
+
 // settings.json の問題文の欄の設定（Phase 15 作業 3。D-196・D-197）
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -730,6 +793,7 @@ pub struct LoadedSettings {
     pub submit: SubmitSettings,
     pub notify: NotifySettings,
     pub atcoder_problems: AtcoderProblemsSettings,
+    pub standings: StandingsSettings,
     pub problem: ProblemSettings,
     pub cpp: CppSettings,
     pub python: PythonSettings,
@@ -755,6 +819,7 @@ fn parse_settings(value: Value) -> Option<LoadedSettings> {
     let submit = parse_submit(&value, &mut appearance_problems);
     let notify = parse_notify(&value, &mut appearance_problems);
     let atcoder_problems = parse_atcoder_problems(&value, &mut appearance_problems);
+    let standings = parse_standings_settings(&value, &mut appearance_problems);
     let problem = parse_problem_settings(&value, &mut appearance_problems);
     let cpp = parse_cpp_settings(&value, &mut appearance_problems);
     let python = parse_python_settings(&value, &mut appearance_problems);
@@ -765,6 +830,7 @@ fn parse_settings(value: Value) -> Option<LoadedSettings> {
         submit,
         notify,
         atcoder_problems,
+        standings,
         problem,
         cpp,
         python,
@@ -800,7 +866,7 @@ pub fn settings_stamp(dir: &Path) -> Option<(SystemTime, u64)> {
     Some((metadata.modified().ok()?, metadata.len()))
 }
 
-// 設定の画面の保存（作業 6b。D-159）。今のファイルの keyBindings・colors と、editor・problem・submit・notify・atcoderProblems・python の
+// 設定の画面の保存（作業 6b。D-159）。今のファイルの keyBindings・colors と、editor・problem・submit・notify・atcoderProblems・standings・python の
 // 設定の画面で扱う項目だけを入れ替え、ほかの項目は残す（python は interpreter だけ。処理系のパスは残す。Phase 19 作業 3。D-221）。読めないファイル（JSON の誤り・版の違い）には書かない
 #[allow(clippy::too_many_arguments)]
 pub fn write_settings(
@@ -812,6 +878,7 @@ pub fn write_settings(
     atcoder_problems: &AtcoderProblemsSettings,
     problem_settings: &ProblemSettings,
     interpreter: Interpreter,
+    standings: &StandingsSettings,
 ) -> Result<(), String> {
     let path = dir.join(SETTINGS_FILE);
     let mut value = match fs::read(&path) {
@@ -846,6 +913,11 @@ pub fn write_settings(
     parse_problem_settings(&checked, &mut problems);
     parse_atcoder_problems(
         &serde_json::json!({ "atcoderProblems": { "user": atcoder_problems.user } }),
+        &mut problems,
+    );
+    // 前後の空白を外し、同じ ID を 1 つにしたもの
+    let standings = parse_standings_settings(
+        &serde_json::json!({ "standings": { "follow": standings.follow } }),
         &mut problems,
     );
     if !problems.is_empty() || key_bindings.iter().any(|binding| binding.key.len() > 32) {
@@ -891,6 +963,11 @@ pub fn write_settings(
     );
     merge_section(
         object,
+        "standings",
+        serde_json::json!({ "follow": standings.follow }),
+    );
+    merge_section(
+        object,
         "python",
         serde_json::json!({ "interpreter": interpreter }),
     );
@@ -930,6 +1007,7 @@ pub fn write_default_settings(dir: &Path) -> Result<(), String> {
         "submit": { "testBeforeSubmit": true, "confirmDialog": true },
         "notify": { "judge": false, "contestStart": false },
         "atcoderProblems": { "user": "" },
+        "standings": { "follow": [] },
         "cpp": { "compiler": "" },
         "python": { "interpreter": "cpython", "cpython": "", "pypy": "" },
     });
@@ -1382,6 +1460,7 @@ mod tests {
             &AtcoderProblemsSettings::default(),
             &ProblemSettings::default(),
             Interpreter::Cpython,
+            &StandingsSettings::default(),
         )
         .unwrap();
         let value: Value =
@@ -1417,7 +1496,8 @@ mod tests {
                 &NotifySettings::default(),
                 &AtcoderProblemsSettings::default(),
                 &ProblemSettings::default(),
-                Interpreter::Cpython
+                Interpreter::Cpython,
+                &StandingsSettings::default(),
             )
             .is_err()
         );
@@ -1433,7 +1513,8 @@ mod tests {
                 &NotifySettings::default(),
                 &AtcoderProblemsSettings::default(),
                 &ProblemSettings::default(),
-                Interpreter::Cpython
+                Interpreter::Cpython,
+                &StandingsSettings::default(),
             )
             .is_err()
         );
@@ -1449,6 +1530,7 @@ mod tests {
             &AtcoderProblemsSettings::default(),
             &ProblemSettings::default(),
             Interpreter::Cpython,
+            &StandingsSettings::default(),
         )
         .unwrap();
         assert!(matches!(load_settings(&dir.0), Ok(Loaded::Ok(_))));
@@ -1500,6 +1582,7 @@ mod tests {
             &AtcoderProblemsSettings::default(),
             &ProblemSettings::default(),
             Interpreter::Cpython,
+            &StandingsSettings::default(),
         )
         .unwrap();
         assert_eq!(submit_settings(&dir.0), submit);
@@ -1537,12 +1620,74 @@ mod tests {
                 },
                 &ProblemSettings::default(),
                 Interpreter::Cpython,
+                &StandingsSettings::default(),
             )
         };
         write("user_1").unwrap();
         assert_eq!(atcoder_problems_settings(&dir.0).user, "user_1");
         assert!(write("../x").is_err());
         assert_eq!(atcoder_problems_settings(&dir.0).user, "user_1");
+    }
+
+    #[test]
+    fn reads_standings_settings() {
+        let read = |text: &str| parse_settings(serde_json::from_str(text).unwrap()).unwrap();
+        assert!(read(r#"{"version": 1}"#).standings.follow.is_empty());
+        // 前後の空白は外し、空は飛ばし、大文字・小文字だけが違うものは 1 つ。正しくないものは使わずに知らせる
+        let loaded = read(
+            r#"{"version": 1, "standings": {"follow": [" chokudai ", "", "Chokudai", "user_1", "a/b", 3]}}"#,
+        );
+        assert_eq!(loaded.standings.follow, ["chokudai", "user_1"]);
+        assert_eq!(loaded.appearance_problems.len(), 1);
+        assert!(
+            loaded.appearance_problems[0].contains("\"a/b\"・3"),
+            "{:?}",
+            loaded.appearance_problems
+        );
+        let loaded = read(r#"{"version": 1, "standings": {"follow": "chokudai"}}"#);
+        assert!(loaded.standings.follow.is_empty());
+        assert_eq!(loaded.appearance_problems.len(), 1);
+        // 30 人まで
+        let many: Vec<String> = (0..35).map(|i| format!("\"u{i}\"")).collect();
+        let loaded = read(&format!(
+            r#"{{"version": 1, "standings": {{"follow": [{}]}}}}"#,
+            many.join(",")
+        ));
+        assert_eq!(loaded.standings.follow.len(), MAX_FOLLOW);
+        assert_eq!(loaded.standings.follow[29], "u29");
+        assert_eq!(loaded.appearance_problems.len(), 1);
+        // 書いて読み直す。ほかの欄の項目は残す。正しくない ID があれば書かない
+        let dir = TempDir::new("standings");
+        fs::create_dir_all(&dir.0).unwrap();
+        std::fs::write(
+            dir.0.join(SETTINGS_FILE),
+            r#"{"version": 1, "standings": {"other": 1}}"#,
+        )
+        .unwrap();
+        let write = |follow: &[&str]| {
+            write_settings(
+                &dir.0,
+                &[],
+                &Appearance::default(),
+                &SubmitSettings::default(),
+                &NotifySettings::default(),
+                &AtcoderProblemsSettings::default(),
+                &ProblemSettings::default(),
+                Interpreter::Cpython,
+                &StandingsSettings {
+                    follow: follow.iter().map(|user| user.to_string()).collect(),
+                },
+            )
+        };
+        write(&["tourist", " user_1 ", "TOURIST"]).unwrap();
+        assert_eq!(standings_settings(&dir.0).follow, ["tourist", "user_1"]);
+        let text = std::fs::read_to_string(dir.0.join(SETTINGS_FILE)).unwrap();
+        assert!(text.contains("\"other\": 1"), "{text}");
+        assert!(write(&["tourist", "../x"]).is_err());
+        assert_eq!(standings_settings(&dir.0).follow, ["tourist", "user_1"]);
+        // 初めての起動で作る settings.json は空
+        write_default_settings(&dir.0).unwrap();
+        assert!(standings_settings(&dir.0).follow.is_empty());
     }
 
     #[test]
@@ -1611,6 +1756,7 @@ mod tests {
                 &AtcoderProblemsSettings::default(),
                 &ProblemSettings::default(),
                 interpreter,
+                &StandingsSettings::default(),
             )
             .unwrap()
         };
@@ -1722,6 +1868,7 @@ mod tests {
             &AtcoderProblemsSettings::default(),
             &problem,
             Interpreter::Cpython,
+            &StandingsSettings::default(),
         )
         .unwrap();
         let loaded = load();
@@ -1744,7 +1891,8 @@ mod tests {
                 &NotifySettings::default(),
                 &AtcoderProblemsSettings::default(),
                 &bad,
-                Interpreter::Cpython
+                Interpreter::Cpython,
+                &StandingsSettings::default(),
             )
             .is_err()
         );
@@ -1825,6 +1973,7 @@ mod tests {
                 &AtcoderProblemsSettings::default(),
                 &ProblemSettings::default(),
                 Interpreter::Cpython,
+                &StandingsSettings::default(),
             )
         };
         write("editor").unwrap();

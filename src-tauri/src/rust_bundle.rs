@@ -405,6 +405,14 @@ fn is_inside(path: &Path, root: &Path) -> bool {
     path.starts_with(root)
 }
 
+// libraries/rust/ の中のパスの依存か（D-251。main で使っていなくても、「パスの依存」の注意は出さない）
+pub fn in_library(dependency: &Dependency, library_root: &Path) -> bool {
+    dependency
+        .path
+        .as_deref()
+        .is_some_and(|path| is_inside(path, library_root))
+}
+
 // 読んだライブラリ
 struct Library {
     module: String,

@@ -2278,7 +2278,7 @@ button.breadcrumb:focus-visible {
   font-size: 12px;
 }
 
-/* 右下パネル（Phase 6 作業 3）：「提出結果」だけ（Phase 12 作業 1。D-182） */
+/* 右下パネル（Phase 6 作業 3）：「提出結果」と「追跡」のタブ（Phase 12 作業 1。D-182。Phase 31。D-253） */
 .right-panel,
 .right-panel-body {
   display: flex;
@@ -2406,6 +2406,92 @@ button.breadcrumb:focus-visible {
 .submit-footnote {
   margin-top: 10px;
   color: var(--fg-muted);
+}
+
+/* 右下の「追跡」（Phase 31。D-253）：自分と追跡するユーザーの順位表の行 */
+.follow-body {
+  flex: 1 1 0;
+  min-height: 0;
+  overflow: auto;
+  padding: 6px 12px 8px;
+}
+
+.follow-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.follow-contest {
+  color: var(--fg-strong);
+}
+
+.follow-time {
+  flex: 1;
+  color: var(--fg-muted);
+}
+
+.follow-scroll {
+  overflow-x: auto;
+}
+
+.follow-table {
+  border-collapse: collapse;
+  font-variant-numeric: tabular-nums;
+}
+
+.follow-table th,
+.follow-table td {
+  padding: 3px 6px;
+  border-bottom: 1px solid var(--border);
+  text-align: center;
+  white-space: nowrap;
+}
+
+.follow-table th {
+  color: var(--fg-muted);
+  font-weight: normal;
+}
+
+.follow-table .follow-user {
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-align: left;
+}
+
+.follow-row-me {
+  background: var(--bg-list-selected);
+}
+
+.follow-me,
+.follow-sub,
+.follow-unrated {
+  color: var(--fg-muted);
+}
+
+.follow-sub {
+  font-size: 0.85em;
+}
+
+.follow-ac {
+  color: var(--verdict-ac);
+}
+
+.follow-wa,
+.follow-penalty {
+  color: var(--verdict-ng);
+}
+
+.follow-pending {
+  margin-left: 2px;
+  color: var(--fg-muted);
+}
+
+.follow-missing {
+  color: var(--fg-muted);
+  text-align: left !important;
 }
 
 /* 判定中の印（灰） */
@@ -2896,6 +2982,23 @@ body.hide-breadcrumbs .breadcrumbs {
   display: flex;
   align-items: center;
   gap: 8px;
+}
+
+/* 見出しの下に入力の欄を置く（追跡するユーザー。Phase 31。D-253） */
+.settings-field-column {
+  flex-direction: column;
+  align-items: flex-start;
+}
+
+.settings-textarea {
+  width: 260px;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-base);
+  color: var(--fg-default);
+  font: inherit;
+  resize: vertical;
 }
 
 .settings-text {

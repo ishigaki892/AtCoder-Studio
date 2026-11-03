@@ -6,6 +6,7 @@
 //   APerf は、レートと参加回数から内部のレートを逆算した近似（AtCoder Problems の inverse_adjust_rating と同じ式）
 // - 予想 diff：AtCoder Problems（estimator/main.py。MIT）と同じく、解けた人数の期待値が実際の人数と等しくなる値（D-232）
 // - Rated の範囲は、コンテストのトップページ（ログインなしで読める）から読み、アプリを開いている間だけ覚える
+// - 追跡するユーザーの AC 状況（Phase 31。D-253）：同じ順位表から、自分と追跡するユーザーの行だけを取り出す
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
@@ -35,6 +36,9 @@ pub struct StandingsJson {
 #[serde(rename_all = "PascalCase")]
 pub struct TaskInfo {
     pub task_screen_name: String,
+    // 問題の記号（A・B…）
+    #[serde(default)]
+    pub assignment: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -57,9 +61,25 @@ pub struct Row {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct TaskResult {
+    // 得点の 100 倍
     pub score: f64,
-    // 1 なら AC
+    // 1 なら得点がある（AC）。提出したが得点がなければ 10（【手元】ABC481 の順位表。2026-11-03）
     pub status: i64,
+    // 提出の数
+    #[serde(default)]
+    pub count: i64,
+    // 判定を受けた提出の数（コンパイルエラーは数えない【推測】。得点がないときは、誤答の数として出す）
+    #[serde(default)]
+    pub failure: i64,
+    // 得点を取るまでの誤答の数（得点があるときだけ）
+    #[serde(default)]
+    pub penalty: i64,
+    // 得点を取った時刻（開始からのナノ秒）
+    #[serde(default)]
+    pub elapsed: i64,
+    // 判定待ちの提出がある
+    #[serde(default)]
+    pub pending: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -67,6 +87,14 @@ pub struct TaskResult {
 pub struct TotalResult {
     // 提出の数（0 なら提出していない）
     pub count: i64,
+    // 得点の 100 倍
+    #[serde(default)]
+    pub score: f64,
+    // 時間（開始からのナノ秒。ペナルティの時間を含む）
+    #[serde(default)]
+    pub elapsed: i64,
+    #[serde(default)]
+    pub penalty: i64,
 }
 
 pub fn parse_standings(text: &str) -> Result<StandingsJson, String> {
@@ -397,6 +425,156 @@ fn difficulty_of(rows: &[Row], task: &str, before: &dyn Fn(&Row) -> i64) -> Opti
     Some(positivize(raw_difficulty(&ratings, accepted) as f64).round() as i64)
 }
 
+// ---- 追跡するユーザー（Phase 31。D-253） ----
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FollowTask {
+    pub task: String,
+    // 列の見出し（A・B…。なければ問題の ID）
+    pub label: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FollowCell {
+    // 得点（100 倍を直した値）
+    pub score: f64,
+    // 得点がある（AC。部分点を含む）
+    pub accepted: bool,
+    // 得点を取った時刻（開始からの秒。得点がなければ None）
+    pub elapsed_secs: Option<i64>,
+    // 得点を取るまでの誤答の数
+    pub penalty: i64,
+    // 判定を受けた提出の数（得点がないときは、誤答の数）
+    pub failure: i64,
+    // 提出の数
+    pub count: i64,
+    pub pending: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FollowRow {
+    // 順位表にあればその書き方、なければ設定の書き方
+    pub user: String,
+    // 自分の行
+    pub me: bool,
+    // 順位表に行がない（参加していない・ID の誤り）。ほかの欄は空
+    pub missing: bool,
+    pub rank: Option<i64>,
+    // レート（0 なら None）。色に使う
+    pub rating: Option<i64>,
+    pub is_rated: bool,
+    // 提出がある
+    pub submitted: bool,
+    pub score: f64,
+    // 時間（開始からの秒。ペナルティの時間を含む）
+    pub elapsed_secs: i64,
+    pub penalty: i64,
+    // 問題の順（FollowTable.tasks と同じ）。出していない問題は None
+    pub cells: Vec<Option<FollowCell>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FollowTable {
+    pub fixed: bool,
+    pub tasks: Vec<FollowTask>,
+    // 自分（分かれば一番上）、次に設定の順
+    pub rows: Vec<FollowRow>,
+}
+
+const NANOS: i64 = 1_000_000_000;
+
+fn follow_cell(result: &TaskResult) -> FollowCell {
+    let accepted = result.status == 1 && result.score > 0.0;
+    FollowCell {
+        score: result.score / 100.0,
+        accepted,
+        elapsed_secs: accepted.then_some(result.elapsed / NANOS),
+        penalty: result.penalty,
+        failure: result.failure,
+        count: result.count,
+        pending: result.pending,
+    }
+}
+
+fn follow_row(tasks: &[TaskInfo], user: &str, me: bool, row: Option<&Row>) -> FollowRow {
+    let Some(row) = row else {
+        return FollowRow {
+            user: user.to_string(),
+            me,
+            missing: true,
+            rank: None,
+            rating: None,
+            is_rated: false,
+            submitted: false,
+            score: 0.0,
+            elapsed_secs: 0,
+            penalty: 0,
+            cells: vec![None; tasks.len()],
+        };
+    };
+    FollowRow {
+        user: row.user_screen_name.clone(),
+        me,
+        missing: false,
+        rank: Some(row.rank),
+        rating: (row.rating > 0).then_some(row.rating),
+        is_rated: row.is_rated,
+        submitted: row.total_result.count > 0,
+        score: row.total_result.score / 100.0,
+        elapsed_secs: row.total_result.elapsed / NANOS,
+        penalty: row.total_result.penalty,
+        cells: tasks
+            .iter()
+            .map(|task| {
+                row.task_results
+                    .get(&task.task_screen_name)
+                    .map(follow_cell)
+            })
+            .collect(),
+    }
+}
+
+// 順位表から、自分（me）と追跡するユーザー（follow）の行を取り出す。ID の大文字・小文字は区別しない。
+// 自分を追跡の一覧にも書いていれば、一番上の 1 行だけにする
+pub fn follow_table(standings: &StandingsJson, me: Option<&str>, follow: &[String]) -> FollowTable {
+    let find = |user: &str| {
+        standings
+            .standings_data
+            .iter()
+            .find(|row| row.user_screen_name.eq_ignore_ascii_case(user))
+    };
+    let tasks = &standings.task_info;
+    let mut rows: Vec<FollowRow> = me
+        .map(|me| follow_row(tasks, me, true, find(me)))
+        .into_iter()
+        .collect();
+    for user in follow {
+        if me.is_some_and(|me| me.eq_ignore_ascii_case(user)) {
+            continue;
+        }
+        rows.push(follow_row(tasks, user, false, find(user)));
+    }
+    FollowTable {
+        fixed: standings.fixed,
+        tasks: tasks
+            .iter()
+            .map(|task| FollowTask {
+                task: task.task_screen_name.clone(),
+                label: if task.assignment.is_empty() {
+                    task.task_screen_name.clone()
+                } else {
+                    task.assignment.clone()
+                },
+            })
+            .collect(),
+        rows,
+    }
+}
+
 // ---- 読む ----
 
 // コンテストのトップページから読んだもの（アプリを開いている間だけ覚える）
@@ -460,10 +638,18 @@ pub fn contest_info(
     tag = "kind"
 )]
 pub enum StandingsOutcome {
-    Read { summary: Summary },
+    // follow は追跡の表（Phase 31。D-253）
+    Read {
+        summary: Summary,
+        follow: FollowTable,
+    },
     // 始まる前（読まない）
     NotStarted,
-    Failed { message: String },
+    // ログインしていない（「追跡」の「更新」で、Keychain にない・ログインのページへ移された）
+    NotLoggedIn,
+    Failed {
+        message: String,
+    },
 }
 
 #[cfg(test)]
@@ -707,5 +893,101 @@ mod tests {
     fn rejects_broken_or_huge_standings() {
         assert!(parse_standings("{}").is_err());
         assert!(parse_standings(&" ".repeat(MAX_STANDINGS_BYTES + 1)).is_err());
+    }
+
+    // 本物の順位表（ABC481。2026-11-03 に確かめた）と同じ書き方の行
+    #[test]
+    fn picks_followed_users() {
+        let data = parse_standings(r#"{"Fixed":true,"AdditionalColumns":null,
+            "TaskInfo":[{"Assignment":"A","TaskName":"a","TaskScreenName":"x_a"},{"Assignment":"B","TaskName":"b","TaskScreenName":"x_b"}],
+            "StandingsData":[
+              {"Rank":1,"UserScreenName":"Alice","IsRated":true,"Rating":2400,"OldRating":2380,"Competitions":30,
+               "TaskResults":{
+                 "x_a":{"Count":1,"Failure":1,"Penalty":0,"Score":10000,"Elapsed":72000000000,"Status":1,"Pending":false,"Frozen":false,"SubmissionID":5},
+                 "x_b":{"Count":3,"Failure":3,"Penalty":2,"Score":20000,"Elapsed":1677000000000,"Status":1,"Pending":false,"Frozen":false,"SubmissionID":6}},
+               "TotalResult":{"Count":4,"Accepted":2,"Penalty":2,"Score":30000,"Elapsed":2277000000000,"Frozen":false}},
+              {"Rank":2,"UserScreenName":"me","IsRated":false,"Rating":0,"OldRating":0,"Competitions":0,
+               "TaskResults":{
+                 "x_a":{"Count":2,"Failure":2,"Penalty":0,"Score":0,"Elapsed":0,"Status":10,"Pending":true,"Frozen":false,"SubmissionID":0}},
+               "TotalResult":{"Count":2,"Accepted":0,"Penalty":0,"Score":0,"Elapsed":0,"Frozen":false}},
+              {"Rank":3,"UserScreenName":"quiet","IsRated":true,"Rating":800,"OldRating":800,"Competitions":3,
+               "TaskResults":{},"TotalResult":{"Count":0,"Accepted":0,"Penalty":0,"Score":0,"Elapsed":0,"Frozen":false}}
+            ],"Translation":{}}"#).unwrap();
+        let follow: Vec<String> = ["alice", "ME", "nobody", "quiet"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let table = follow_table(&data, Some("me"), &follow);
+        assert!(table.fixed);
+        assert_eq!(
+            table
+                .tasks
+                .iter()
+                .map(|t| (t.task.as_str(), t.label.as_str()))
+                .collect::<Vec<_>>(),
+            [("x_a", "A"), ("x_b", "B")]
+        );
+        // 自分が一番上（追跡の一覧の「ME」は重ねない）、次に設定の順。名前は順位表の書き方
+        let users: Vec<(&str, bool, bool)> = table
+            .rows
+            .iter()
+            .map(|r| (r.user.as_str(), r.me, r.missing))
+            .collect();
+        assert_eq!(
+            users,
+            [
+                ("me", true, false),
+                ("Alice", false, false),
+                ("nobody", false, true),
+                ("quiet", false, false)
+            ]
+        );
+        let alice = &table.rows[1];
+        assert_eq!(
+            (
+                alice.rank,
+                alice.rating,
+                alice.score,
+                alice.elapsed_secs,
+                alice.penalty
+            ),
+            (Some(1), Some(2400), 300.0, 2277, 2)
+        );
+        assert_eq!(
+            alice.cells[1],
+            Some(FollowCell {
+                score: 200.0,
+                accepted: true,
+                elapsed_secs: Some(1677),
+                penalty: 2,
+                failure: 3,
+                count: 3,
+                pending: false
+            })
+        );
+        let me = &table.rows[0];
+        assert_eq!((me.rating, me.submitted), (None, true));
+        assert_eq!(
+            me.cells,
+            [
+                Some(FollowCell {
+                    score: 0.0,
+                    accepted: false,
+                    elapsed_secs: None,
+                    penalty: 0,
+                    failure: 2,
+                    count: 2,
+                    pending: true
+                }),
+                None
+            ]
+        );
+        assert_eq!(table.rows[2].cells, [None, None]);
+        assert!(!table.rows[3].submitted);
+        // 自分が分からなければ、追跡する人だけ
+        let table = follow_table(&data, None, &follow);
+        assert_eq!(table.rows.len(), 4);
+        assert_eq!(table.rows[1].user, "me");
+        assert!(!table.rows[1].me);
     }
 }

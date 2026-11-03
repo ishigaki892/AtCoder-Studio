@@ -193,6 +193,7 @@ pub fn run() {
             commands::atcoder_submit,
             commands::atcoder_submissions,
             commands::contest_status,
+            commands::contest_standings,
             commands::contest_period,
             commands::watch_contest_start,
             commands::atcoder_refresh_submission,

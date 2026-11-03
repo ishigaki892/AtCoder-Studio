@@ -1,6 +1,6 @@
 [package]
 name = "atcoder-studio"
-version = "0.1.7"
+version = "0.1.8"
 description = "AtCoder Studio"
 authors = ["ishigaki"]
 license = "MIT"

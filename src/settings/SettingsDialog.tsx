@@ -15,6 +15,7 @@ import {
   type Appearance,
   type Interpreter,
   type AtcoderProblemsSettings,
+  type StandingsSettings,
   type LoadedKeyBinding,
   type NotifySettings,
   type ProblemSettings,
@@ -31,6 +32,8 @@ import { remeasureEditor } from "../editor/Editor";
 import {
   ColorsSection,
   currentAssigned,
+  FOLLOW_NOTE,
+  FollowUsersField,
   KeysSection,
   MAX_FONT_SIZE,
   MIN_FONT_SIZE,
@@ -53,6 +56,7 @@ type Section =
   | "submit"
   | "notify"
   | "past"
+  | "follow"
   | "python"
   | "snippets"
   | "templates";
@@ -66,6 +70,8 @@ type Props = {
   notify: NotifySettings;
   // 今の AtCoder Problems の設定（AtCoder の ID。D-241）
   atcoderProblems: AtcoderProblemsSettings;
+  // 今の順位表の設定（追跡するユーザー。D-253）
+  standings: StandingsSettings;
   // 今使っている問題文の欄の設定（D-196・D-197）
   problem: ProblemSettings;
   // 今の Python の設定（D-221）。画面で変えるのは処理系だけ
@@ -81,6 +87,7 @@ type Props = {
     atcoderProblems: AtcoderProblemsSettings,
     problem: ProblemSettings,
     interpreter: Interpreter,
+    standings: StandingsSettings,
   ) => void;
   // 外で変わっていて保存できなかった。App が読み直す（resetSeq が進む）
   onReload: () => Promise<void>;
@@ -99,6 +106,7 @@ function SettingsDialog({
   submit,
   notify,
   atcoderProblems,
+  standings,
   problem,
   python,
   resetSeq,
@@ -117,6 +125,7 @@ function SettingsDialog({
   const [submitDraft, setSubmitDraft] = useState<SubmitSettings>(submit);
   const [notifyDraft, setNotifyDraft] = useState<NotifySettings>(notify);
   const [pastDraft, setPastDraft] = useState<AtcoderProblemsSettings>(atcoderProblems);
+  const [followDraft, setFollowDraft] = useState<StandingsSettings>(standings);
   const [problemDraft, setProblemDraft] = useState<ProblemSettings>(problem);
   const [interpreterDraft, setInterpreterDraft] = useState<Interpreter>(python.interpreter);
   const [capturing, setCapturing] = useState<Command | null>(null);
@@ -134,6 +143,7 @@ function SettingsDialog({
     setSubmitDraft(submit);
     setNotifyDraft(notify);
     setPastDraft(atcoderProblems);
+    setFollowDraft(standings);
     setProblemDraft(problem);
     setInterpreterDraft(python.interpreter);
     setCapturing(null);
@@ -247,6 +257,7 @@ function SettingsDialog({
         pastDraft,
         problemDraft,
         interpreterDraft,
+        followDraft,
       );
       if (outcome === "changedOutside") {
         await onReload();
@@ -257,7 +268,7 @@ function SettingsDialog({
         return;
       }
       setKeyBindings(bindings);
-      onSaved(appearanceToSave, submitDraft, notifyDraft, pastDraft, problemDraft, interpreterDraft);
+      onSaved(appearanceToSave, submitDraft, notifyDraft, pastDraft, problemDraft, interpreterDraft, followDraft);
       onClose();
       if (ui) {
         onSwitchToEditor();
@@ -294,6 +305,7 @@ function SettingsDialog({
                 ["submit", "提出"],
                 ["notify", "通知"],
                 ["past", "過去問"],
+                ["follow", "追跡"],
                 ["python", "Python"],
                 ["snippets", "スニペット"],
                 ["templates", "テンプレート"],
@@ -374,6 +386,15 @@ function SettingsDialog({
                 ID を使います（ログインしていなければ AC 状況は出さず、diff だけを出します）。ID は AtCoder Problems（kenkoooo.com。AtCoder
                 とは別の人が運営している非公式のサービス）に送り、公開されている提出を読みます。
               </p>
+            </div>
+          )}
+          {section === "follow" && (
+            <div className="settings-view">
+              <label className="settings-field settings-field-column">
+                追跡するユーザー（AtCoder の ID）
+                <FollowUsersField follow={followDraft.follow} onChange={(follow) => setFollowDraft({ follow })} />
+              </label>
+              <p className="settings-note">{FOLLOW_NOTE}</p>
             </div>
           )}
           {section === "snippets" && (

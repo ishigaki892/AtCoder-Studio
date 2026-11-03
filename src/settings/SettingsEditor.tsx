@@ -12,6 +12,7 @@ import {
   saveSettings,
   type Appearance,
   type AtcoderProblemsSettings,
+  type StandingsSettings,
   type Interpreter,
   type LoadedKeyBinding,
   type NotifySettings,
@@ -28,6 +29,8 @@ import type { SnippetsViews } from "./SettingsDialog";
 import {
   ColorsSection,
   currentAssigned,
+  FOLLOW_NOTE,
+  FollowUsersField,
   KeysSection,
   MAX_FONT_SIZE,
   MIN_FONT_SIZE,
@@ -47,6 +50,7 @@ type Props = {
   submit: SubmitSettings;
   notify: NotifySettings;
   atcoderProblems: AtcoderProblemsSettings;
+  standings: StandingsSettings;
   problem: ProblemSettings;
   python: PythonSettings;
   // App が settings.json を読み直したら進む。進んだら、中身を読み直す
@@ -60,6 +64,7 @@ type Props = {
     atcoderProblems: AtcoderProblemsSettings,
     problem: ProblemSettings,
     interpreter: Interpreter,
+    standings: StandingsSettings,
   ) => void;
   // 外で変わっていて保存できなかった。App が読み直す（resetSeq が進む）
   onReload: () => Promise<void>;
@@ -128,12 +133,13 @@ function CheckItem({
 }
 
 function SettingsEditor(props: Props) {
-  const { appearance, submit, notify, atcoderProblems, problem, python, resetSeq } = props;
+  const { appearance, submit, notify, atcoderProblems, standings, problem, python, resetSeq } = props;
   const [assigned, setAssigned] = useState<Assigned>(currentAssigned);
   const [draft, setDraft] = useState<Appearance>(appearance);
   const [submitDraft, setSubmitDraft] = useState<SubmitSettings>(submit);
   const [notifyDraft, setNotifyDraft] = useState<NotifySettings>(notify);
   const [pastDraft, setPastDraft] = useState<AtcoderProblemsSettings>(atcoderProblems);
+  const [followDraft, setFollowDraft] = useState<StandingsSettings>(standings);
   const [problemDraft, setProblemDraft] = useState<ProblemSettings>(problem);
   const [interpreterDraft, setInterpreterDraft] = useState<Interpreter>(python.interpreter);
   const [capturing, setCapturing] = useState<Command | null>(null);
@@ -144,8 +150,26 @@ function SettingsEditor(props: Props) {
   const listRef = useRef<HTMLDivElement>(null);
 
   // 保存に使う最新の中身（タイマーの中から読む）
-  const latest = useRef({ assigned, draft, submitDraft, notifyDraft, pastDraft, problemDraft, interpreterDraft });
-  latest.current = { assigned, draft, submitDraft, notifyDraft, pastDraft, problemDraft, interpreterDraft };
+  const latest = useRef({
+    assigned,
+    draft,
+    submitDraft,
+    notifyDraft,
+    pastDraft,
+    problemDraft,
+    interpreterDraft,
+    followDraft,
+  });
+  latest.current = {
+    assigned,
+    draft,
+    submitDraft,
+    notifyDraft,
+    pastDraft,
+    problemDraft,
+    interpreterDraft,
+    followDraft,
+  };
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const saving = useRef(false);
   const pending = useRef(false);
@@ -179,6 +203,7 @@ function SettingsEditor(props: Props) {
           v.pastDraft,
           v.problemDraft,
           v.interpreterDraft,
+          v.followDraft,
         );
         if (outcome === "changedOutside") {
           await onReloadRef.current();
@@ -194,7 +219,15 @@ function SettingsEditor(props: Props) {
           continue;
         }
         setKeyBindings(bindings);
-        onSavedRef.current(v.draft, v.submitDraft, v.notifyDraft, v.pastDraft, v.problemDraft, v.interpreterDraft);
+        onSavedRef.current(
+          v.draft,
+          v.submitDraft,
+          v.notifyDraft,
+          v.pastDraft,
+          v.problemDraft,
+          v.interpreterDraft,
+          v.followDraft,
+        );
       } while (pending.current);
     } catch (e) {
       setNotice(String(e));
@@ -239,6 +272,7 @@ function SettingsEditor(props: Props) {
     setSubmitDraft(submit);
     setNotifyDraft(notify);
     setPastDraft(atcoderProblems);
+    setFollowDraft(standings);
     setProblemDraft(problem);
     setInterpreterDraft(python.interpreter);
     setCapturing(null);
@@ -256,9 +290,10 @@ function SettingsEditor(props: Props) {
     setSubmitDraft(submit);
     setNotifyDraft(notify);
     setPastDraft(atcoderProblems);
+    setFollowDraft(standings);
     setProblemDraft(problem);
     setInterpreterDraft(python.interpreter);
-  }, [appearance, submit, notify, atcoderProblems, problem, python]);
+  }, [appearance, submit, notify, atcoderProblems, standings, problem, python]);
 
   // 隠れたら、キーの受け取りをやめる（隠れている間に押したキーを、割り当てに使わない。C-8）
   useEffect(() => {
@@ -399,6 +434,7 @@ function SettingsEditor(props: Props) {
     judge: hit("判定の通知", "notify.judge", "通知", "提出の判定が決まったときに知らせる"),
     start: hit("コンテストの開始の通知", "notify.contestStart", "通知", "残り時間"),
     user: hit("AtCoder の ID", "atcoderProblems.user", "過去問", "AtCoder Problems", "AC 状況"),
+    follow: hit("追跡するユーザー", "standings.follow", "追跡", "ユーザー", "順位表", "AC 状況", "ライバル"),
     python: hit("Python の処理系", "python.interpreter", "CPython", "PyPy", "言語"),
     snippets: LANGUAGES.filter(({ value, label }) => hit("スニペット", label, snippetsFile(value), "snippets")),
     templates: hit(
@@ -427,6 +463,7 @@ function SettingsEditor(props: Props) {
     submit: show.testFirst || show.confirm,
     notify: show.judge || show.start,
     past: show.user,
+    follow: show.follow,
     python: show.python,
     snippets: show.snippets.length > 0,
     templates: show.templates,
@@ -452,6 +489,7 @@ function SettingsEditor(props: Props) {
     },
     { id: "notify", label: "通知" },
     { id: "past", label: "過去問" },
+    { id: "follow", label: "追跡" },
     { id: "cat-lang", label: "言語", children: [{ id: "python", label: "Python" }] },
     {
       id: "cat-files",
@@ -796,6 +834,16 @@ function SettingsEditor(props: Props) {
                   const user = event.target.value;
                   change(setPastDraft, () => ({ user }));
                 }}
+              />
+            </Item>
+          )}
+
+          {sections.follow && heading("follow", "追跡", 2)}
+          {show.follow && (
+            <Item title="追跡するユーザー" jsonKey="standings.follow" description={FOLLOW_NOTE}>
+              <FollowUsersField
+                follow={followDraft.follow}
+                onChange={(follow) => change(setFollowDraft, () => ({ follow }))}
               />
             </Item>
           )}

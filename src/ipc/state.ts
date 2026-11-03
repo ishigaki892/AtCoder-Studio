@@ -73,6 +73,13 @@ export type AtcoderProblemsSettings = { user: string };
 
 export const DEFAULT_ATCODER_PROBLEMS_SETTINGS: AtcoderProblemsSettings = { user: "" };
 
+// settings.json の順位表の設定（Phase 31。D-253）。follow は追跡するユーザーの AtCoder の ID。
+// 設定の画面では、書いている途中の行（空・正しくないもの）もそのまま持ち、保存のときに Rust 側が確かめる
+// （前後の空白を外し、空の行と同じ ID を除く。正しくない ID・31 人目があれば保存しない）
+export type StandingsSettings = { follow: string[] };
+
+export const DEFAULT_STANDINGS_SETTINGS: StandingsSettings = { follow: [] };
+
 // settings.json の問題文の欄の設定（Phase 15 作業 3。D-196・D-197）
 export type ProblemSettings = {
   // 見出しの行に出すボタン（PROBLEM_BUTTONS の名前）。出さないものは「…」の一覧に入る
@@ -134,6 +141,7 @@ export type SettingsView = {
   submit: SubmitSettings;
   notify: NotifySettings;
   atcoderProblems: AtcoderProblemsSettings;
+  standings: StandingsSettings;
   problem: ProblemSettings;
   python: PythonSettings;
   appearanceProblems: string[];
@@ -175,6 +183,7 @@ export function saveSettings(
   atcoderProblems: AtcoderProblemsSettings,
   problem: ProblemSettings,
   interpreter: Interpreter,
+  standings: StandingsSettings,
 ): Promise<SaveSettingsOutcome> {
   return invoke<SaveSettingsOutcome>("save_settings", {
     keyBindings,
@@ -184,6 +193,7 @@ export function saveSettings(
     atcoderProblems,
     problem,
     interpreter,
+    standings,
   });
 }
 

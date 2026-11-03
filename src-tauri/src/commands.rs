@@ -1462,7 +1462,9 @@ pub fn open_submission_page(contest: String, submission_id: Option<u64>) -> Resu
 }
 
 // サイドバーの「コンテスト」：コンテストの問題ごとの提出状況（Phase 18 作業 4。D-218）。
-// 「自分の提出」のページを、セッションを付けて読む（読むのは画面が頼んだときだけ）
+// 「自分の提出」のページを、セッションを付けて読む（読むのは画面が頼んだときだけ）。
+// 順位表から、追跡するユーザー（settings.json の standings.follow）の行も取り出す（Phase 31。D-253）。
+// 「自分の提出」のページでログインしているユーザーが分かったら覚えて、画面に知らせる（「追跡」の自分の行に使う）
 #[tauri::command]
 pub async fn contest_status(
     contest: String,
@@ -1470,10 +1472,48 @@ pub async fn contest_status(
 ) -> Result<submit::StatusOutcome, String> {
     let dir = app_dir(&app)?;
     tauri::async_runtime::spawn_blocking(move || {
-        submit::contest_status(&submit::Remote::app(), &dir, &contest)
+        let follow = storage::standings_settings(&dir).follow;
+        let outcome = submit::contest_status(&submit::Remote::app(), &dir, &contest, &follow);
+        if let submit::StatusOutcome::Read { status } = &outcome {
+            remember_user(&app, status.user.clone());
+        }
+        outcome
     })
     .await
     .map_err(|_| "提出状況を読めません".to_string())
+}
+
+// 分かったユーザー名を覚えて、変わっていれば画面に知らせる
+fn remember_user(app: &AppHandle, user: Option<String>) {
+    let state = app.state::<SessionState>();
+    if user.is_some() && user != state.user() {
+        state.set_user(user.clone());
+        session::notify(
+            app,
+            SessionView {
+                logged_in: true,
+                user_name: user,
+                error: None,
+            },
+        );
+    }
+}
+
+// 右下の「追跡」の「更新」（Phase 31。D-253）：順位表だけを読み、自分と追跡するユーザーの行を返す。
+// 自分の ID が分からなければ、過去問の表と同じく AtCoder のトップページを 1 回読んで覚える（logged_in_user）
+#[tauri::command]
+pub async fn contest_standings(
+    contest: String,
+    app: AppHandle,
+) -> Result<crate::standings::StandingsOutcome, String> {
+    let dir = app_dir(&app)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let follow = storage::standings_settings(&dir).follow;
+        let user = logged_in_user(&app);
+        submit::contest_standings(&submit::Remote::app(), &contest, user.as_deref(), &follow)
+    })
+    .await
+    .map_err(|_| "順位表を読めません".to_string())
 }
 
 // ツールバーの残り時間：コンテストの開始・終了の時刻（Phase 22 作業 1。D-238）。
@@ -1776,6 +1816,8 @@ pub struct SettingsView {
     notify: NotifySettings,
     // AtCoder Problems の設定（AtCoder の ID。D-241）。表を出すときは Rust 側が読み直す
     atcoder_problems: AtcoderProblemsSettings,
+    // 順位表の設定（追跡するユーザー。D-253）。表を作るときは Rust 側が読み直す
+    standings: storage::StandingsSettings,
     // 問題文の欄の設定（D-196・D-197）
     problem: ProblemSettings,
     // Python の設定（Phase 19 作業 3。D-221）。設定の画面は処理系を選ぶのに使う。動かすときは Rust 側が読み直す
@@ -1793,6 +1835,7 @@ impl SettingsView {
             submit: loaded.submit,
             notify: loaded.notify,
             atcoder_problems: loaded.atcoder_problems,
+            standings: loaded.standings,
             problem: loaded.problem,
             python: loaded.python,
             appearance_problems: loaded.appearance_problems,
@@ -1807,6 +1850,7 @@ impl SettingsView {
             submit: SubmitSettings::default(),
             notify: NotifySettings::default(),
             atcoder_problems: AtcoderProblemsSettings::default(),
+            standings: storage::StandingsSettings::default(),
             problem: ProblemSettings::default(),
             python: PythonSettings::default(),
             appearance_problems: Vec::new(),
@@ -2309,6 +2353,7 @@ pub async fn save_settings(
     atcoder_problems: AtcoderProblemsSettings,
     problem: ProblemSettings,
     interpreter: Interpreter,
+    standings: storage::StandingsSettings,
 ) -> Result<SaveSettingsOutcome, String> {
     ensure_primary(&app)?;
     let dir = app_dir(&app)?;
@@ -2346,6 +2391,7 @@ pub async fn save_settings(
         &atcoder_problems,
         &problem,
         interpreter,
+        &standings,
     )?;
     stamp.update(&dir)?;
     // 通知をオンにしたら、テストの通知を 1 回出す（初めてなら、ここで macOS が許可の確認を出す。D-239）
