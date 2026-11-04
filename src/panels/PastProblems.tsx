@@ -1,4 +1,4 @@
-// 中央の「過去問」のタブ（Phase 24 作業 2。D-242）。ABC・ARC・AGC を切り替えて、行はコンテスト（新しい順）、
+// 中央の「過去問」のタブ（Phase 24 作業 2。D-242）。ABC・ARC・AGC・AWC（D-255）を切り替えて、行はコンテスト（新しい順）、
 // 列は問題の記号の表を出す。ますは AtCoder Problems の diff の色、背景で AC 状況（AC は緑、AC していない提出があれば黄）。
 // ますを押すと、その問題を問題文の欄に出す。読むのは Rust 側（src-tauri/src/atcoder_problems.rs）
 import { useEffect, useRef, useState } from "react";
@@ -15,6 +15,8 @@ const CATEGORIES: { id: PastCategory; label: string }[] = [
   { id: "abc", label: "ABC" },
   { id: "arc", label: "ARC" },
   { id: "agc", label: "AGC" },
+  // AtCoder Weekday Contest。AtCoder Problems に diff がないので、ますは「—」と AC 状況の背景だけ
+  { id: "awc", label: "AWC" },
 ];
 
 type Props = {

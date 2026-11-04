@@ -20,8 +20,8 @@ export function difficultyText(view: DifficultyView): string {
   return `diff ${view.value}${view.experimental ? "?" : ""}`;
 }
 
-// 中央の「過去問」のタブの表（Phase 24 作業 2。D-242）
-export type PastCategory = "abc" | "arc" | "agc";
+// 中央の「過去問」のタブの表（Phase 24 作業 2。D-242。AWC は D-255）
+export type PastCategory = "abc" | "arc" | "agc" | "awc";
 export type Solved = "accepted" | "tried";
 export type PastCell = { problem: string; difficulty: DifficultyView | null; solved: Solved | null };
 export type PastRow = { contest: string; title: string; cells: (PastCell | null)[] };

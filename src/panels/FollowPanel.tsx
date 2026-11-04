@@ -1,5 +1,6 @@
-// 右下パネルの「追跡」（Phase 31。D-253）：今のコンテストの順位表から、自分（一番上）と追跡するユーザー
+// 右下パネルの「追跡」（Phase 31。D-253）：今のコンテストの順位表から、自分と追跡するユーザー
 // （settings.json の standings.follow）の順位・得点・問題ごとの結果を表で出す。
+// 行は順位の順に並べ（Rust 側で並べる）、左の列に追跡の中の順位を出す（D-254）。
 // 順位表を読むのは「更新」と、サイドバーの「コンテスト」が読んだときだけ（決まった間隔では読まない。D-233）
 import { useEffect, useState } from "react";
 import type { FollowCell, FollowRow, FollowTable, StandingsOutcome } from "../ipc/submit";
@@ -107,6 +108,7 @@ function Cell({ cell }: { cell: FollowCell | null }) {
 }
 
 function Row({ row, columns }: { row: FollowRow; columns: number }) {
+  const groupRank = <td className="follow-group-rank">{row.groupRank ?? "—"}</td>;
   const name = (
     <td className="follow-user">
       <span className={row.rating !== null ? ratingClass(row.rating) : "follow-unrated"} title={row.user}>
@@ -118,6 +120,7 @@ function Row({ row, columns }: { row: FollowRow; columns: number }) {
   if (row.missing) {
     return (
       <tr className={row.me ? "follow-row-me" : undefined}>
+        {groupRank}
         {name}
         <td className="follow-missing" colSpan={columns + 2}>
           この順位表にいません（参加していないか、ID が違います）
@@ -127,6 +130,7 @@ function Row({ row, columns }: { row: FollowRow; columns: number }) {
   }
   return (
     <tr className={row.me ? "follow-row-me" : undefined}>
+      {groupRank}
       {name}
       <td className="follow-rank">{row.submitted && row.rank !== null ? row.rank : "—"}</td>
       <td className="follow-score" title={row.submitted ? `時間 ${elapsedText(row.elapsedSecs)}（ペナルティを含む）` : undefined}>
@@ -205,8 +209,9 @@ function FollowPanel({ contest, entry, loggedIn, loading, onRefresh, onLogin }: 
           <table className="follow-table">
             <thead>
               <tr>
+                <th title="追跡している人（自分を含む）の中での順位">#</th>
                 <th>ユーザー</th>
-                <th>順位</th>
+                <th title="公式の順位表の順位">順位</th>
                 <th>得点</th>
                 {table.tasks.map((task) => (
                   <th key={task.task} title={task.task}>

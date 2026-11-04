@@ -275,9 +275,12 @@ pub fn parse_contest_problems(text: &str) -> Result<Vec<ContestProblem>, String>
         .ok_or_else(|| wrong_shape("問題"))
 }
 
-// 表の種類。コンテストの ID が「abc」「arc」「agc」と数字 3 桁のもの
+// 表の種類（D-242・D-255）
+pub const CATEGORIES: [&str; 4] = ["abc", "arc", "agc", "awc"];
+
+// コンテストの ID が、種類の 3 文字と数字 3 桁以上のものか（ABC・ARC・AGC は数字 3 桁、AWC は 4 桁）
 pub fn category_of(contest: &str, category: &str) -> bool {
-    contest.len() == 6
+    contest.len() >= 6
         && contest.starts_with(category)
         && contest[3..].bytes().all(|b| b.is_ascii_digit())
 }
@@ -538,7 +541,7 @@ pub fn past_view(
     now: SystemTime,
     fetch: &mut Fetch,
 ) -> Result<PastView, String> {
-    if !["abc", "arc", "agc"].contains(&category) {
+    if !CATEGORIES.contains(&category) {
         return Err("表の種類が正しくありません".to_string());
     }
     let mut messages = Vec::new();
@@ -872,9 +875,47 @@ mod tests {
         assert_eq!((table.accepted, table.total), (1, 5));
         assert!(
             category_of("agc001", "agc")
+                && category_of("awc0001", "awc")
                 && !category_of("agc001a", "agc")
                 && !category_of("abcxyz", "abc")
+                && !category_of("awc01", "awc")
+                && !category_of("awc0001", "abc")
         );
+        // AWC（D-255）：数字 4 桁の ID。diff がなくても行を出し、回ごとに問題の数が違えば列はすべての記号
+        let contests = parse_contests(
+            r#"[{"id":"awc0001","start_epoch_second":100,"title":"AtCoder Weekday Contest 0001 Beta"},
+                {"id":"awc0002","start_epoch_second":200,"title":"AtCoder Weekday Contest 0002 Beta"},
+                {"id":"abc001","start_epoch_second":300,"title":"ABC 001"}]"#,
+        )
+        .unwrap();
+        let problems = parse_contest_problems(
+            r#"[{"contest_id":"awc0001","problem_id":"awc0001_a","problem_index":"A"},
+                {"contest_id":"awc0002","problem_id":"awc0002_a","problem_index":"A"},
+                {"contest_id":"awc0002","problem_id":"awc0002_f","problem_index":"F"},
+                {"contest_id":"abc001","problem_id":"abc001_a","problem_index":"A"}]"#,
+        )
+        .unwrap();
+        let solved: HashMap<String, Solved> = [("awc0002_f".to_string(), Solved::Accepted)].into();
+        let table = build_table(
+            "awc",
+            &contests,
+            &problems,
+            &Models::default(),
+            &solved,
+            5000,
+        );
+        assert_eq!(table.columns, ["A", "F"]);
+        let ids: Vec<&str> = table.rows.iter().map(|r| r.contest.as_str()).collect();
+        assert_eq!(ids, ["awc0002", "awc0001"]);
+        assert!(table.rows[1].cells[1].is_none());
+        assert!(
+            table.rows[0].cells[0]
+                .as_ref()
+                .unwrap()
+                .difficulty
+                .is_none()
+        );
+        assert_eq!((table.accepted, table.total), (1, 3));
         for text in ["{}", "[]", r#"[{"id":1}]"#] {
             assert!(
                 parse_contests(text).is_err() && parse_contest_problems(text).is_err(),

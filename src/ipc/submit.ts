@@ -176,6 +176,8 @@ export type FollowRow = {
   // 順位表に行がない（参加していない・ID の誤り）
   missing: boolean;
   rank: number | null;
+  // 追跡の表の中の順位（提出のある行だけで数える。公式の順位が同じなら同じ数。D-254）
+  groupRank: number | null;
   // レート（0 なら null）
   rating: number | null;
   isRated: boolean;
@@ -191,7 +193,7 @@ export type FollowRow = {
 export type FollowTable = {
   fixed: boolean;
   tasks: FollowTask[];
-  // 自分（分かれば一番上）、次に設定の順
+  // 提出のある行を公式の順位の順、次に提出のない行、最後に順位表にいない行（D-254）
   rows: FollowRow[];
 };
 

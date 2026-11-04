@@ -4517,7 +4517,7 @@ mod tests {
             panic!("順位表を読めるはず：{:?}", status.standings);
         };
         assert_eq!(status.user.as_deref(), Some("me"));
-        // 追跡の表：自分、次に設定の順（順位表にいない人も行を出す）
+        // 追跡の表：順位の順、最後に順位表にいない人（行は出す。D-254）
         let rows: Vec<(&str, bool, Option<i64>)> = follow
             .rows
             .iter()
@@ -4659,7 +4659,8 @@ mod tests {
             panic!("読めるはず");
         };
         let rows: Vec<&str> = follow.rows.iter().map(|row| row.user.as_str()).collect();
-        assert_eq!(rows, ["me", "first"]);
+        // 順位の順（first が 1 位、自分が 2 位。D-254）
+        assert_eq!(rows, ["first", "me"]);
         assert_eq!(follow.tasks[0].task, "w_a");
         let targets: Vec<String> = seen
             .lock()

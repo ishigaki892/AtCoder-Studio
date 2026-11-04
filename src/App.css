@@ -2454,6 +2454,10 @@ button.breadcrumb:focus-visible {
   font-weight: normal;
 }
 
+.follow-group-rank {
+  color: var(--fg-strong);
+}
+
 .follow-table .follow-user {
   max-width: 140px;
   overflow: hidden;
@@ -2915,17 +2919,29 @@ body.hide-breadcrumbs .breadcrumbs {
   overflow: auto;
 }
 
+/* 罫線は重ねない（separate）。collapse だと、上に貼り付く見出しの罫線が貼り付かず、
+   見出しの上にわずかな隙間ができて下の行が透ける。各ますは右と下、左端と一番上だけ左と上を引く */
 .past-table {
-  border-collapse: collapse;
+  border-collapse: separate;
+  border-spacing: 0;
   font-variant-numeric: tabular-nums;
 }
 
 .past-table th,
 .past-table td {
-  border: 1px solid var(--border);
+  border-right: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
   padding: 0;
   text-align: center;
   white-space: nowrap;
+}
+
+.past-table tr > :first-child {
+  border-left: 1px solid var(--border);
+}
+
+.past-table thead th {
+  border-top: 1px solid var(--border);
 }
 
 .past-table thead th {

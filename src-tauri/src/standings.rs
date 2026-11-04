@@ -463,6 +463,8 @@ pub struct FollowRow {
     // 順位表に行がない（参加していない・ID の誤り）。ほかの欄は空
     pub missing: bool,
     pub rank: Option<i64>,
+    // 追跡の表の中の順位（提出のある行だけで数える。公式の順位が同じなら同じ数。D-254）
+    pub group_rank: Option<i64>,
     // レート（0 なら None）。色に使う
     pub rating: Option<i64>,
     pub is_rated: bool,
@@ -481,7 +483,8 @@ pub struct FollowRow {
 pub struct FollowTable {
     pub fixed: bool,
     pub tasks: Vec<FollowTask>,
-    // 自分（分かれば一番上）、次に設定の順
+    // 提出のある行を公式の順位の順（同じ順位なら自分、次に設定の順）、次に提出のない行、
+    // 最後に順位表にいない行（どちらも自分、次に設定の順）。D-254
     pub rows: Vec<FollowRow>,
 }
 
@@ -507,6 +510,7 @@ fn follow_row(tasks: &[TaskInfo], user: &str, me: bool, row: Option<&Row>) -> Fo
             me,
             missing: true,
             rank: None,
+            group_rank: None,
             rating: None,
             is_rated: false,
             submitted: false,
@@ -521,6 +525,7 @@ fn follow_row(tasks: &[TaskInfo], user: &str, me: bool, row: Option<&Row>) -> Fo
         me,
         missing: false,
         rank: Some(row.rank),
+        group_rank: None,
         rating: (row.rating > 0).then_some(row.rating),
         is_rated: row.is_rated,
         submitted: row.total_result.count > 0,
@@ -538,8 +543,24 @@ fn follow_row(tasks: &[TaskInfo], user: &str, me: bool, row: Option<&Row>) -> Fo
     }
 }
 
-// 順位表から、自分（me）と追跡するユーザー（follow）の行を取り出す。ID の大文字・小文字は区別しない。
-// 自分を追跡の一覧にも書いていれば、一番上の 1 行だけにする
+// 行を順位の順に並べ、追跡の表の中の順位を付ける（D-254）。並べ替えは安定なので、
+// 同じ順位・提出のない行・順位表にいない行は、渡した順（自分、次に設定の順）のまま
+fn rank_follow_rows(rows: &mut [FollowRow]) {
+    let ranked = |row: &FollowRow| row.submitted.then_some(row.rank).flatten();
+    rows.sort_by_key(|row| match ranked(row) {
+        Some(rank) => (0, rank),
+        None if !row.missing => (1, 0),
+        None => (2, 0),
+    });
+    let ranks: Vec<i64> = rows.iter().filter_map(ranked).collect();
+    for row in rows.iter_mut() {
+        row.group_rank =
+            ranked(row).map(|rank| 1 + ranks.iter().filter(|&&other| other < rank).count() as i64);
+    }
+}
+
+// 順位表から、自分（me）と追跡するユーザー（follow）の行を取り出し、順位の順に並べる。
+// ID の大文字・小文字は区別しない。自分を追跡の一覧にも書いていれば、1 行だけにする
 pub fn follow_table(standings: &StandingsJson, me: Option<&str>, follow: &[String]) -> FollowTable {
     let find = |user: &str| {
         standings
@@ -558,6 +579,7 @@ pub fn follow_table(standings: &StandingsJson, me: Option<&str>, follow: &[Strin
         }
         rows.push(follow_row(tasks, user, false, find(user)));
     }
+    rank_follow_rows(&mut rows);
     FollowTable {
         fixed: standings.fixed,
         tasks: tasks
@@ -927,22 +949,23 @@ mod tests {
                 .collect::<Vec<_>>(),
             [("x_a", "A"), ("x_b", "B")]
         );
-        // 自分が一番上（追跡の一覧の「ME」は重ねない）、次に設定の順。名前は順位表の書き方
-        let users: Vec<(&str, bool, bool)> = table
+        // 提出のある行を順位の順、次に提出のない行、最後に順位表にいない行（追跡の一覧の「ME」は
+        // 重ねない）。名前は順位表の書き方
+        let users: Vec<(&str, bool, bool, Option<i64>)> = table
             .rows
             .iter()
-            .map(|r| (r.user.as_str(), r.me, r.missing))
+            .map(|r| (r.user.as_str(), r.me, r.missing, r.group_rank))
             .collect();
         assert_eq!(
             users,
             [
-                ("me", true, false),
-                ("Alice", false, false),
-                ("nobody", false, true),
-                ("quiet", false, false)
+                ("Alice", false, false, Some(1)),
+                ("me", true, false, Some(2)),
+                ("quiet", false, false, None),
+                ("nobody", false, true, None)
             ]
         );
-        let alice = &table.rows[1];
+        let alice = &table.rows[0];
         assert_eq!(
             (
                 alice.rank,
@@ -965,7 +988,7 @@ mod tests {
                 pending: false
             })
         );
-        let me = &table.rows[0];
+        let me = &table.rows[1];
         assert_eq!((me.rating, me.submitted), (None, true));
         assert_eq!(
             me.cells,
@@ -982,12 +1005,88 @@ mod tests {
                 None
             ]
         );
-        assert_eq!(table.rows[2].cells, [None, None]);
-        assert!(!table.rows[3].submitted);
+        assert_eq!(table.rows[3].cells, [None, None]);
+        assert!(!table.rows[2].submitted);
         // 自分が分からなければ、追跡する人だけ
         let table = follow_table(&data, None, &follow);
         assert_eq!(table.rows.len(), 4);
         assert_eq!(table.rows[1].user, "me");
         assert!(!table.rows[1].me);
+    }
+
+    // 追跡の表の中の順位（D-254）：公式の順位が同じなら同じ数で、次の数は飛ぶ。同じ順位の行・
+    // 提出のない行・順位表にいない行は、自分、次に設定の順
+    #[test]
+    fn ranks_followed_users_among_themselves() {
+        let row = |user: &str, rank: i64, count: i64| {
+            format!(
+                r#"{{"Rank":{rank},"UserScreenName":"{user}","IsRated":true,"Rating":1200,"OldRating":1200,"Competitions":5,
+                "TaskResults":{{}},"TotalResult":{{"Count":{count},"Accepted":0,"Penalty":0,"Score":0,"Elapsed":0,"Frozen":false}}}}"#
+            )
+        };
+        let rows = [
+            row("a", 3, 1),
+            row("b", 10, 1),
+            row("c", 3, 1),
+            row("d", 50, 0),
+            row("e", 50, 0),
+            row("me", 3, 1),
+            row("f", 1, 1),
+        ];
+        let data = parse_standings(&format!(
+            r#"{{"Fixed":false,"TaskInfo":[],"StandingsData":[{}],"Translation":{{}}}}"#,
+            rows.join(",")
+        ))
+        .unwrap();
+        let follow: Vec<String> = ["e", "x", "c", "b", "d", "a", "f", "y"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let ranked = |me: Option<&str>| {
+            follow_table(&data, me, &follow)
+                .rows
+                .iter()
+                .map(|r| (r.user.clone(), r.group_rank))
+                .collect::<Vec<_>>()
+        };
+        let expect = |rows: &[(&str, Option<i64>)]| {
+            rows.iter()
+                .map(|(user, rank)| (user.to_string(), *rank))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            ranked(Some("me")),
+            expect(&[
+                ("f", Some(1)),
+                ("me", Some(2)),
+                ("c", Some(2)),
+                ("a", Some(2)),
+                ("b", Some(5)),
+                ("e", None),
+                ("d", None),
+                ("x", None),
+                ("y", None)
+            ])
+        );
+        assert_eq!(
+            ranked(None),
+            expect(&[
+                ("f", Some(1)),
+                ("c", Some(2)),
+                ("a", Some(2)),
+                ("b", Some(4)),
+                ("e", None),
+                ("d", None),
+                ("x", None),
+                ("y", None)
+            ])
+        );
+        // 自分が順位表にいなければ、自分の行は順位表にいない行の先頭
+        let missing_me = follow_table(&data, Some("ghost"), &follow);
+        let last: Vec<(&str, bool)> = missing_me.rows[6..]
+            .iter()
+            .map(|r| (r.user.as_str(), r.me))
+            .collect();
+        assert_eq!(last, [("ghost", true), ("x", false), ("y", false)]);
     }
 }
