@@ -160,6 +160,8 @@ pub struct PackageResult {
     pub input: Option<String>,
     // 作ったあとに開くファイル（例：abc480/abc480_a/src/main.rs、C++ なら abc480/abc480_a/main.cpp）
     pub main: String,
+    // 生成器の知らせ（読めなかったところ・満たしていない制約。生成器を新しく書いたときだけ。D-259）
+    pub generator: Option<String>,
 }
 
 fn relative(root: &Path, path: &Path) -> String {
@@ -316,39 +318,8 @@ fn prepare_contest_dir(
     Ok((dir, created))
 }
 
-// 1 問のパッケージを、コンテストのフォルダ（contest_dir）の中に作る。すでにあるものは変えない
-pub fn write_package(
-    root: &Path,
-    contest_dir: &Path,
-    task: &str,
-    problem: &Problem,
-    template: &Template,
-) -> PackageResult {
-    let dir = contest_dir.join(task);
-    let main_path = match template.language {
-        Language::Rust => dir.join("src").join("main.rs"),
-        Language::Cpp => dir.join(crate::cpp::SOURCE),
-        Language::Python => dir.join(crate::python::SOURCE),
-    };
-    let mut result = PackageResult {
-        task: task.to_string(),
-        path: relative(root, &dir),
-        main: relative(root, &main_path),
-        ..PackageResult::default()
-    };
-    // ほかの言語のパッケージのフォルダには、ファイルを足さない（D-208）
-    if let Some(other) = [Language::Rust, Language::Cpp, Language::Python]
-        .into_iter()
-        .find(|other| *other != template.language && other.is_package(&dir))
-    {
-        result.error = Some(format!(
-            "「{}」は {} のパッケージなので、{} のファイルは作りません",
-            result.path,
-            other.label(),
-            template.language.label()
-        ));
-        return result;
-    }
+// 新しく書く main の中身と、入力のコードについての知らせ（問題のフォルダを作るときと、白紙から解き直すとき。D-258）
+fn initial_main(problem: &Problem, template: &Template) -> (String, Option<String>) {
     // 入れる設定なら、テンプレートの solve()（と main()）の input! を作ったものにする（D-198）。
     // C++ は main.cpp の solve()（なければ main()）に、目印で囲んで入れる（Phase 17 作業 8。D-213）。
     // 作れないときは、テンプレートのまま書いて理由を知らせる
@@ -357,7 +328,7 @@ pub fn write_package(
         Language::Cpp => &template.main_cpp,
         Language::Python => &template.main_py,
     };
-    let (main_text, input_note) = match template.fill {
+    match template.fill {
         None => (source.clone(), None),
         Some(fill) => match input_gen::generate_for(
             &problem.statement_html,
@@ -394,7 +365,43 @@ pub fn write_package(
                 )),
             ),
         },
+    }
+}
+
+// 1 問のパッケージを、コンテストのフォルダ（contest_dir）の中に作る。すでにあるものは変えない
+pub fn write_package(
+    root: &Path,
+    contest_dir: &Path,
+    task: &str,
+    problem: &Problem,
+    template: &Template,
+) -> PackageResult {
+    let dir = contest_dir.join(task);
+    let main_path = match template.language {
+        Language::Rust => dir.join("src").join("main.rs"),
+        Language::Cpp => dir.join(crate::cpp::SOURCE),
+        Language::Python => dir.join(crate::python::SOURCE),
     };
+    let mut result = PackageResult {
+        task: task.to_string(),
+        path: relative(root, &dir),
+        main: relative(root, &main_path),
+        ..PackageResult::default()
+    };
+    // ほかの言語のパッケージのフォルダには、ファイルを足さない（D-208）
+    if let Some(other) = [Language::Rust, Language::Cpp, Language::Python]
+        .into_iter()
+        .find(|other| *other != template.language && other.is_package(&dir))
+    {
+        result.error = Some(format!(
+            "「{}」は {} のパッケージなので、{} のファイルは作りません",
+            result.path,
+            other.label(),
+            template.language.label()
+        ));
+        return result;
+    }
+    let (main_text, input_note) = initial_main(problem, template);
     let outcome = (|| -> Result<(), String> {
         ensure_dir_inside(root, &dir)?;
         let files = match template.language {
@@ -429,6 +436,11 @@ pub fn write_package(
                 result.existed.push(name);
             }
         }
+        // ランダムテストの生成器と愚直解（D-259）。すでにあれば変えない
+        let programs = write_random_programs(root, &dir, problem, template)?;
+        result.generator = programs.note;
+        result.created.extend(programs.created);
+        result.existed.extend(programs.existed);
         // サンプルは、今の「サンプルを保存」と同じ書き方（上書きしない。D-112）。bin が 1 つなので test/（D-106）
         let tests = dir.join("test");
         ensure_dir_inside(root, &tests)?;
@@ -467,6 +479,164 @@ pub fn write_package(
     })();
     result.error = outcome.err();
     result
+}
+
+// ---- 生成器と愚直解の雛形（Phase 35 作業 2。D-259） ----
+
+// 書いた・すでにあったファイル（作業領域のルートからの相対パス）と、生成器の知らせ
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RandomPrograms {
+    pub created: Vec<String>,
+    pub existed: Vec<String>,
+    // 生成器を新しく書いたときの知らせ（読めなかったところ・満たしていない制約）
+    pub note: Option<String>,
+}
+
+// パッケージの examples/ に、ランダムテストの生成器（gen）と愚直解（naive）を、なければ書く。
+// 生成器は問題文の入力の形式から作る（gen_template.rs）。愚直解は、問題のフォルダを作るときの main と同じ中身
+pub fn write_random_programs(
+    root: &Path,
+    dir: &Path,
+    problem: &Problem,
+    template: &Template,
+) -> Result<RandomPrograms, String> {
+    let examples = dir.join("examples");
+    ensure_dir_inside(root, &examples)?;
+    let extension = template.language.extension();
+    let (generator, note) = crate::gen_template::generate(problem, template.language);
+    let (naive, _) = initial_main(problem, template);
+    let mut result = RandomPrograms::default();
+    for (name, content, is_generator) in [("gen", generator, true), ("naive", naive, false)] {
+        let path = examples.join(format!("{name}.{extension}"));
+        let shown = relative(root, &path);
+        if write_new(&path, &content).map_err(|error| format!("「{shown}」を{error}"))? {
+            if is_generator {
+                result.note = note.clone();
+            }
+            result.created.push(shown);
+        } else {
+            result.existed.push(shown);
+        }
+    }
+    Ok(result)
+}
+
+// ---- 白紙から解き直す（Phase 34 作業 3。D-258） ----
+
+// 解き直しで動かした・書いたファイル。パスは作業領域のルートからの相対パス
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Restarted {
+    // 書き直した main（例：abc480/abc480_a/src/main.rs）
+    pub main: String,
+    // 前の main を移した先（例：abc480/abc480_a/old/main-20261112-153000.rs）
+    pub old: String,
+    // 入力のコードについての知らせ（入れる設定のときだけ）
+    pub input: Option<String>,
+}
+
+// パッケージの main。Rust は src/main.rs だけ（src/bin/ に .rs があるパッケージは、どの問題の main か決まらないので扱わない）
+pub fn restart_main(dir: &Path, language: Language) -> Result<PathBuf, String> {
+    let main = match language {
+        Language::Rust => {
+            let has_bins = std::fs::read_dir(dir.join("src").join("bin")).is_ok_and(|entries| {
+                entries
+                    .flatten()
+                    .any(|entry| entry.path().extension().is_some_and(|ext| ext == "rs"))
+            });
+            if has_bins {
+                return Err(
+                    "src/bin/ にファイルがあるパッケージは、白紙から解き直せません（main が決まりません）"
+                        .to_string(),
+                );
+            }
+            dir.join("src").join("main.rs")
+        }
+        Language::Cpp => dir.join(crate::cpp::SOURCE),
+        Language::Python => dir.join(crate::python::SOURCE),
+    };
+    // リンクは扱わない（移した先が作業領域の外を指さないように）
+    if !std::fs::symlink_metadata(&main).is_ok_and(|metadata| metadata.file_type().is_file()) {
+        return Err(format!(
+            "{} が見つかりません",
+            main.file_name().unwrap_or_default().to_string_lossy()
+        ));
+    }
+    Ok(main)
+}
+
+// 移す先の名前（main-YYYYMMDD-HHMMSS.<拡張子>。同じ名前があれば -2・-3 …）
+fn old_name(old_dir: &Path, stamp: &str, extension: &str, attempt: usize) -> PathBuf {
+    if attempt <= 1 {
+        old_dir.join(format!("main-{stamp}.{extension}"))
+    } else {
+        old_dir.join(format!("main-{stamp}-{attempt}.{extension}"))
+    }
+}
+
+// main を、パッケージの old/ に日時を付けた名前で移し、問題のフォルダを作るときと同じ中身で書き直す。
+// 移すのは、リンクを作ってから元を消す形（hard_link は同じ名前があると失敗するので、上書きしない）。
+// 書き直せなかったときは、移したものを戻す。problem がなければ（問題文が保存されていない）、入力のコードは入れない。
+// stamp は日時（例 20261112-153000）
+pub fn restart_package(
+    root: &Path,
+    dir: &Path,
+    template: &Template,
+    problem: Option<&Problem>,
+    stamp: &str,
+) -> Result<Restarted, String> {
+    let main = restart_main(dir, template.language)?;
+    let old_dir = dir.join("old");
+    ensure_dir_inside(root, &old_dir)?;
+    let mut attempt = 1;
+    let old = loop {
+        let candidate = old_name(&old_dir, stamp, template.language.extension(), attempt);
+        match std::fs::hard_link(&main, &candidate) {
+            Ok(()) => break candidate,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists && attempt < 100 => {
+                attempt += 1;
+            }
+            Err(_) => {
+                return Err(format!("「{}」に移せません", relative(root, &old_dir)));
+            }
+        }
+    };
+    std::fs::remove_file(&main).map_err(|_| {
+        let _ = std::fs::remove_file(&old);
+        format!("「{}」を移せません", relative(root, &main))
+    })?;
+    let (text, input) = match problem {
+        Some(problem) => initial_main(problem, template),
+        None => {
+            let source = match template.language {
+                Language::Rust => &template.main_rs,
+                Language::Cpp => &template.main_cpp,
+                Language::Python => &template.main_py,
+            };
+            let note = template.fill.map(|_| {
+                format!(
+                    "問題文が保存されていないので、{}は入れていません（問題文を表示してから作れます）",
+                    input_gen::input_name(template.language)
+                )
+            });
+            (source.clone(), note)
+        }
+    };
+    match write_new(&main, &text) {
+        Ok(true) => Ok(Restarted {
+            main: relative(root, &main),
+            old: relative(root, &old),
+            input,
+        }),
+        _ => {
+            // 戻す（main ができていれば、戻さずに知らせる）
+            if std::fs::hard_link(&old, &main).is_ok() {
+                let _ = std::fs::remove_file(&old);
+            }
+            Err(format!("「{}」を書けません", relative(root, &main)))
+        }
+    }
 }
 
 // ---- 1 問・コンテスト ----
@@ -946,6 +1116,8 @@ mod tests {
             vec![
                 "abc480/abc480_a/compile_flags.txt",
                 "abc480/abc480_a/main.cpp",
+                "abc480/abc480_a/examples/gen.cpp",
+                "abc480/abc480_a/examples/naive.cpp",
                 "abc480/abc480_a/test/sample-1.in",
                 "abc480/abc480_a/test/sample-1.out",
                 "abc480/abc480_a/test/input.txt",
@@ -1023,6 +1195,8 @@ mod tests {
             created.package.created,
             vec![
                 "abc480/abc480_a/main.py",
+                "abc480/abc480_a/examples/gen.py",
+                "abc480/abc480_a/examples/naive.py",
                 "abc480/abc480_a/test/sample-1.in",
                 "abc480/abc480_a/test/sample-1.out",
                 "abc480/abc480_a/test/input.txt",
@@ -1090,6 +1264,8 @@ mod tests {
             vec![
                 "abc480/abc480_a/Cargo.toml",
                 "abc480/abc480_a/src/main.rs",
+                "abc480/abc480_a/examples/gen.rs",
+                "abc480/abc480_a/examples/naive.rs",
                 "abc480/abc480_a/test/sample-1.in",
                 "abc480/abc480_a/test/sample-1.out",
                 "abc480/abc480_a/test/sample-2.in",
@@ -1451,5 +1627,172 @@ mod tests {
         .unwrap();
         assert_eq!(target.package, "abc999/abc999_a");
         assert_eq!(target.bin, "abc999_a");
+    }
+
+    // 白紙から解き直す（Phase 34 作業 3。D-258）：main を old/ に移し、雛形で書き直す。ほかのファイルは変えない
+    #[test]
+    fn restarts_packages_of_each_language() {
+        let root = TempDir::new("restart");
+        let app = TempDir::new("restart-template");
+        let id = |task: &str| ProblemId::new("abc480", task).unwrap();
+        let sample = problem(&[("1\n", "1\n")]);
+        let load = |_: &ProblemId| Ok(sample.clone());
+        for (task, language, main, old_ext) in [
+            ("abc480_a", Language::Rust, "src/main.rs", "rs"),
+            ("abc480_b", Language::Cpp, "main.cpp", "cpp"),
+            ("abc480_c", Language::Python, "main.py", "py"),
+        ] {
+            let template = load_template(&app.0, language).unwrap();
+            create_problem(&root.0, &id(task), &template, &load).unwrap();
+            let dir = root.0.join("abc480").join(task);
+            std::fs::write(dir.join(main), "前の解答\n").unwrap();
+            std::fs::write(dir.join("test/random-1.in"), "5\n").unwrap();
+            let others: Vec<(PathBuf, String)> = [
+                "test/sample-1.in",
+                "test/compare.json",
+                "Cargo.toml",
+                "compile_flags.txt",
+            ]
+            .iter()
+            .map(|name| dir.join(name))
+            .filter(|path| path.is_file())
+            .map(|path| {
+                let text = read(&path);
+                (path, text)
+            })
+            .collect();
+
+            let restarted =
+                restart_package(&root.0, &dir, &template, Some(&sample), "20261112-153000")
+                    .unwrap();
+            assert_eq!(restarted.main, format!("abc480/{task}/{main}"));
+            assert_eq!(
+                restarted.old,
+                format!("abc480/{task}/old/main-20261112-153000.{old_ext}")
+            );
+            assert_eq!(restarted.input, None);
+            assert_eq!(read(&root.0.join(&restarted.old)), "前の解答\n");
+            let source = match language {
+                Language::Rust => &template.main_rs,
+                Language::Cpp => &template.main_cpp,
+                Language::Python => &template.main_py,
+            };
+            assert_eq!(&read(&dir.join(main)), source);
+            // ほかのファイルは変えない
+            assert_eq!(read(&dir.join("test/random-1.in")), "5\n");
+            for (path, text) in others {
+                assert_eq!(read(&path), text, "{}", path.display());
+            }
+
+            // 同じ名前があれば、上書きせずに番号を付ける
+            std::fs::write(dir.join(main), "2 回目\n").unwrap();
+            let again = restart_package(&root.0, &dir, &template, Some(&sample), "20261112-153000")
+                .unwrap();
+            assert_eq!(
+                again.old,
+                format!("abc480/{task}/old/main-20261112-153000-2.{old_ext}")
+            );
+            assert_eq!(read(&root.0.join(&restarted.old)), "前の解答\n");
+            assert_eq!(read(&root.0.join(&again.old)), "2 回目\n");
+        }
+    }
+
+    #[test]
+    fn restarts_with_the_input_code_and_refuses_odd_packages() {
+        let root = TempDir::new("restart-fill");
+        let app = TempDir::new("restart-fill-template");
+        let mut template = load_template(&app.0, Language::Cpp).unwrap();
+        template.fill = Some(FillInput { main_loop: false });
+        let mut sample = problem(&[("3\n", "3\n")]);
+        sample.statement_html =
+            "<section><h3>入力</h3><pre><var>N</var></pre></section>".to_string();
+        let id = ProblemId::new("abc480", "abc480_a").unwrap();
+        create_problem(&root.0, &id, &template, &|_| Ok(sample.clone())).unwrap();
+        let dir = root.0.join("abc480/abc480_a");
+        let filled = read(&dir.join("main.cpp"));
+        assert!(filled.contains("cin >> N;"));
+        std::fs::write(dir.join("main.cpp"), "x\n").unwrap();
+        // 問題文があれば、作るときと同じく入力のコードを入れる
+        let restarted =
+            restart_package(&root.0, &dir, &template, Some(&sample), "20261112-000000").unwrap();
+        assert_eq!(restarted.input.as_deref(), Some("入力のコードを入れました"));
+        assert_eq!(read(&dir.join("main.cpp")), filled);
+        // 問題文が保存されていなければ、雛形のまま書いて知らせる
+        let restarted = restart_package(&root.0, &dir, &template, None, "20261112-000001").unwrap();
+        assert!(
+            restarted
+                .input
+                .unwrap()
+                .contains("問題文が保存されていない")
+        );
+        assert_eq!(read(&dir.join("main.cpp")), template.main_cpp);
+
+        // Rust の src/bin/ にファイルがあるパッケージ・main がないパッケージは扱わない
+        let rust = default_template();
+        let id = ProblemId::new("abc480", "abc480_b").unwrap();
+        create_problem(&root.0, &id, &rust, &|_| Ok(sample.clone())).unwrap();
+        let dir = root.0.join("abc480/abc480_b");
+        std::fs::create_dir_all(dir.join("src/bin")).unwrap();
+        std::fs::write(dir.join("src/bin/other.rs"), "fn main() {}\n").unwrap();
+        assert!(
+            restart_package(&root.0, &dir, &rust, None, "20261112-000000")
+                .unwrap_err()
+                .contains("src/bin/")
+        );
+        std::fs::remove_dir_all(dir.join("src/bin")).unwrap();
+        std::fs::remove_file(dir.join("src/main.rs")).unwrap();
+        assert!(
+            restart_package(&root.0, &dir, &rust, None, "20261112-000000")
+                .unwrap_err()
+                .contains("見つかりません")
+        );
+        assert!(!dir.join("old").exists());
+    }
+
+    // 生成器と愚直解（Phase 35。D-259）：作るときに置く。愚直解は main と同じ中身。すでにあれば変えない
+    #[test]
+    fn writes_the_generator_and_the_naive_solution() {
+        let root = TempDir::new("random-programs");
+        let app = TempDir::new("random-programs-template");
+        let mut template = load_template(&app.0, Language::Rust).unwrap();
+        template.fill = Some(FillInput { main_loop: false });
+        let mut sample = problem(&[("3\n1 2 3\n", "6\n")]);
+        sample.statement_html = "<section><h3>制約</h3><ul><li><var>1 \\leq N \\leq 10</var></li></ul></section>\
+             <section><h3>入力</h3><pre><var>N</var>\n<var>A_1</var> <var>\\ldots</var> <var>A_N</var></pre></section>"
+            .to_string();
+        let id = ProblemId::new("abc480", "abc480_a").unwrap();
+        let created = create_problem(&root.0, &id, &template, &|_| Ok(sample.clone())).unwrap();
+        let dir = root.0.join("abc480/abc480_a");
+        assert_eq!(
+            read(&dir.join("examples/naive.rs")),
+            read(&dir.join("src/main.rs"))
+        );
+        let generator = read(&dir.join("examples/gen.rs"));
+        assert!(
+            generator.contains("const N_MIN: i64 = 1;\nconst N_MAX: i64 = 8;"),
+            "{generator}"
+        );
+        assert_eq!(created.package.generator, None);
+
+        // 書き換えた生成器は、もう一度作っても変えない
+        std::fs::write(dir.join("examples/gen.rs"), "// 自分の生成器\n").unwrap();
+        let again = create_problem(&root.0, &id, &template, &|_| Ok(sample.clone())).unwrap();
+        assert!(
+            again
+                .package
+                .existed
+                .contains(&"abc480/abc480_a/examples/gen.rs".to_string())
+        );
+        assert_eq!(read(&dir.join("examples/gen.rs")), "// 自分の生成器\n");
+        let programs = write_random_programs(&root.0, &dir, &sample, &template).unwrap();
+        assert!(programs.created.is_empty());
+        assert_eq!(programs.existed.len(), 2);
+        assert_eq!(programs.note, None);
+
+        // 消したものだけを作り直す
+        std::fs::remove_file(dir.join("examples/naive.rs")).unwrap();
+        let programs = write_random_programs(&root.0, &dir, &sample, &template).unwrap();
+        assert_eq!(programs.created, ["abc480/abc480_a/examples/naive.rs"]);
+        assert_eq!(read(&dir.join("examples/gen.rs")), "// 自分の生成器\n");
     }
 }

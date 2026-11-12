@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-retry-problems"
+description = "Enables the retry_problems command without any pre-configured scope."
+commands.allow = ["retry_problems"]
+
+[[permission]]
+identifier = "deny-retry-problems"
+description = "Denies the retry_problems command without any pre-configured scope."
+commands.deny = ["retry_problems"]

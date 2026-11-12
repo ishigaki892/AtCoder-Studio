@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-create-random-programs"
+description = "Enables the create_random_programs command without any pre-configured scope."
+commands.allow = ["create_random_programs"]
+
+[[permission]]
+identifier = "deny-create-random-programs"
+description = "Denies the create_random_programs command without any pre-configured scope."
+commands.deny = ["create_random_programs"]

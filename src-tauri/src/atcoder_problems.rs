@@ -614,6 +614,119 @@ pub fn past_view(
     })
 }
 
+// ---- 解き直しの一覧（Phase 34 作業 1。D-258） ----
+
+// 問題が入っているコンテストと記号（例：abc042・C）
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Place {
+    pub contest: String,
+    pub index: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RetryRow {
+    pub problem: String,
+    // 入っているコンテスト（コンテストの ID の順。データがなければ空）
+    pub places: Vec<Place>,
+    // 行を押したときに問題文の欄に出すコンテスト（問題 ID の頭と同じコンテスト、なければ最初のもの、
+    // データがなければ問題 ID の最後の `_` より前）
+    pub contest: String,
+    pub difficulty: Option<DifficultyView>,
+    pub solved: Option<Solved>,
+    pub solved_by: Option<crate::problem_marks::SolvedBy>,
+    // 印を付けた日
+    pub since: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RetryView {
+    pub rows: Vec<RetryRow>,
+    // AC 状況に使った ID（分からなければ None）
+    pub user: Option<String>,
+    pub messages: Vec<String>,
+}
+
+// 保存してあるデータのファイルだけを読む（古くても読み直さない）
+fn saved_resource<T>(
+    app_dir: &Path,
+    name: &str,
+    parse: fn(&str) -> Result<T, String>,
+) -> Option<T> {
+    let text = std::fs::read_to_string(dir(app_dir).join(name)).ok()?;
+    parse(&text).ok()
+}
+
+// 解き直しの印を付けた問題の一覧（付けた日の新しい順、同じ日は問題 ID の順）。AtCoder Problems のデータは
+// 保存してあるものだけを使い、新しく読まない。AC 状況も保存してあるもの（過去問の表が読んだもの）
+pub fn retry_view(
+    app_dir: &Path,
+    marks: &crate::problem_marks::Marks,
+    user: Option<&str>,
+) -> RetryView {
+    let mut messages = Vec::new();
+    let problems = saved_resource(app_dir, "contest-problem.json", parse_contest_problems);
+    let models = saved_resource(app_dir, "problem-models.json", parse_models);
+    if problems.is_none() || models.is_none() {
+        messages.push(
+            "コンテスト・記号・diff は、「ABC」などの表を一度開いて AtCoder Problems のデータを読むと出ます"
+                .to_string(),
+        );
+    }
+    let user = user.filter(|user| valid_user(user));
+    let solved = user
+        .and_then(|user| saved_solved(app_dir, user))
+        .map(|state| state.problems)
+        .unwrap_or_default();
+    let mut rows: Vec<RetryRow> = marks
+        .iter()
+        .filter_map(|(problem, mark)| {
+            let since = mark.retry.clone()?;
+            let mut places: Vec<Place> = problems
+                .iter()
+                .flatten()
+                .filter(|entry| &entry.problem == problem)
+                .map(|entry| Place {
+                    contest: entry.contest.clone(),
+                    index: entry.index.clone(),
+                })
+                .collect();
+            places.sort_by(|a, b| a.contest.cmp(&b.contest));
+            let head = problem.rfind('_').map(|at| &problem[..at]);
+            let contest = places
+                .iter()
+                .find(|place| Some(place.contest.as_str()) == head)
+                .or(places.first())
+                .map(|place| place.contest.clone())
+                .or(head.map(str::to_string))
+                .unwrap_or_else(|| problem.clone());
+            Some(RetryRow {
+                problem: problem.clone(),
+                places,
+                contest,
+                difficulty: models
+                    .as_ref()
+                    .and_then(|models| models.get(problem).copied()),
+                solved: solved.get(problem).copied(),
+                solved_by: mark.solved,
+                since,
+            })
+        })
+        .collect();
+    rows.sort_by(|a, b| {
+        b.since
+            .cmp(&a.since)
+            .then_with(|| a.problem.cmp(&b.problem))
+    });
+    RetryView {
+        rows,
+        user: user.map(str::to_string),
+        messages,
+    }
+}
+
 // 提出を前に読んだ時刻（ID ごと。開いたときは、前回から 1 分たっていれば読む）
 pub fn should_read_submissions(user: &str, refresh: bool) -> bool {
     static LAST: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
@@ -1051,5 +1164,85 @@ mod tests {
     fn reads_only_atcoder_problems_urls() {
         assert!(fetch("https://example.com/atcoder/resources/x.json").is_err());
         assert!(fetch("http://kenkoooo.com/atcoder/resources/x.json").is_err());
+    }
+
+    #[test]
+    fn lists_retry_marks_from_saved_data_only() {
+        use crate::problem_marks::{Mark, Marks, SolvedBy};
+        let dir = TempDir::new("retry");
+        let mark = |solved: Option<SolvedBy>, retry: Option<&str>| Mark {
+            solved,
+            retry: retry.map(str::to_string),
+        };
+        let marks: Marks = [
+            (
+                "arc058_a".to_string(),
+                mark(Some(SolvedBy::Editorial), Some("2026-11-10")),
+            ),
+            ("abc001_1".to_string(), mark(None, Some("2026-11-12"))),
+            ("abc002_1".to_string(), mark(None, Some("2026-11-10"))),
+            // 印のない記録は出さない
+            ("abc003_1".to_string(), mark(Some(SolvedBy::Myself), None)),
+        ]
+        .into_iter()
+        .collect();
+
+        // データがなければ、問題 ID から決めたコンテストだけで出し、知らせる（読まない）
+        let view = retry_view(&dir.0, &marks, None);
+        assert_eq!(
+            view.rows
+                .iter()
+                .map(|row| row.problem.as_str())
+                .collect::<Vec<_>>(),
+            ["abc001_1", "abc002_1", "arc058_a"]
+        );
+        assert_eq!(view.rows[2].contest, "arc058");
+        assert!(view.rows[2].places.is_empty());
+        assert_eq!(view.messages.len(), 1);
+
+        let data = dir.0.join(DIR);
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::write(
+            data.join("contest-problem.json"),
+            r#"[{"contest_id":"arc058","problem_id":"arc058_a","problem_index":"C"},
+                {"contest_id":"abc042","problem_id":"arc058_a","problem_index":"C"},
+                {"contest_id":"abc001","problem_id":"abc001_1","problem_index":"A"}]"#,
+        )
+        .unwrap();
+        std::fs::write(
+            data.join("problem-models.json"),
+            r#"{"arc058_a":{"difficulty":900.2,"is_experimental":false}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            data.join("submissions-me.json"),
+            r#"{"user":"me","fromSecond":0,"complete":true,"problems":{"arc058_a":"accepted","abc001_1":"tried"}}"#,
+        )
+        .unwrap();
+        let view = retry_view(&dir.0, &marks, Some("me"));
+        assert!(view.messages.is_empty());
+        assert_eq!(view.user.as_deref(), Some("me"));
+        let shared = &view.rows[2];
+        assert_eq!(
+            shared.places,
+            [
+                Place {
+                    contest: "abc042".to_string(),
+                    index: "C".to_string()
+                },
+                Place {
+                    contest: "arc058".to_string(),
+                    index: "C".to_string()
+                },
+            ]
+        );
+        // 押したときは、問題 ID の頭と同じコンテスト
+        assert_eq!(shared.contest, "arc058");
+        assert_eq!(shared.difficulty.map(|d| d.value), Some(900));
+        assert_eq!(shared.solved, Some(Solved::Accepted));
+        assert_eq!(shared.solved_by, Some(SolvedBy::Editorial));
+        assert_eq!(shared.since, "2026-11-10");
+        assert_eq!(view.rows[0].solved, Some(Solved::Tried));
+        assert_eq!(view.rows[1].solved, None);
     }
 }

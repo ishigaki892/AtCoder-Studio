@@ -133,7 +133,8 @@ import BottomRightPanel, { type BottomRightTab } from "./panels/BottomRightPanel
 import FollowPanel, { followEntryAfter, type FollowEntry } from "./panels/FollowPanel";
 import SubmissionPanel, { upsertSubmission, type SubmitNotice } from "./panels/SubmissionPanel";
 import { copyText } from "./panels/copyText";
-import { copySource } from "./ipc/scaffold";
+import { askRestartPackage, copySource, createRandomPrograms, restartPackage } from "./ipc/scaffold";
+import { problemMarks, setProblemMark, setProblemRetry, type ProblemMarks, type SolvedBy } from "./ipc/problemMarks";
 import {
   atcoderLogin,
   atcoderLogout,
@@ -381,6 +382,73 @@ function App() {
   const [atcoderProblemsSettings, setAtcoderProblemsSettings] = useState<AtcoderProblemsSettings>(
     DEFAULT_ATCODER_PROBLEMS_SETTINGS,
   );
+  // 自力 AC・解説 AC の記録（Phase 33。D-257）。問題文の欄と過去問の表の両方に渡し、変えたらどちらもすぐ出し直す
+  const [marks, setMarks] = useState<ProblemMarks>({});
+  useEffect(() => {
+    problemMarks()
+      .then(setMarks)
+      .catch(() => {});
+  }, []);
+  async function changeMark(id: string, solved: SolvedBy | null) {
+    setMarks(await setProblemMark(id, solved));
+  }
+  // 解き直しの印（Phase 34。D-258）
+  async function changeRetry(id: string, on: boolean) {
+    setMarks(await setProblemRetry(id, on));
+  }
+  // 「白紙から解き直す」「生成器と愚直解を作る」を押せない理由（D-258・D-259）。押せるのは、問題文の欄の問題が、
+  // 実行の対象のパッケージのフォルダから決まった問題と同じとき（過去問の表などから同じ問題を出して、結び付きを外していても同じなら押せる）
+  function restartBlocked(): string | undefined {
+    const same =
+      folderProblem !== null &&
+      currentProblem !== null &&
+      folderProblem.contest === currentProblem.contest &&
+      folderProblem.task === currentProblem.task;
+    if (!target || !same) {
+      return "この問題のフォルダ（例：abc480/abc480_a）のファイルを開いてから押してください";
+    }
+    return undefined;
+  }
+  // 白紙から解き直す（D-258）：確認のダイアログ → 保存していない変更を書く → main を old/ に移して雛形で書き直す →
+  // 開いているタブとファイル一覧を読み直す。知らせる文を返す（やめたら null）
+  async function restartProblem(id: ProblemId): Promise<string | null> {
+    if (!target || restartBlocked() !== undefined) {
+      return null;
+    }
+    if (!(await askRestartPackage(target))) {
+      return null;
+    }
+    if (!(await tabs.saveAll())) {
+      return "保存できないファイルがあるので、白紙から解き直すのをやめました";
+    }
+    const result = await restartPackage(target, id);
+    if (tabs.tabs.some((tab) => tab.path === result.main)) {
+      await tabs.reload(result.main);
+    }
+    setTreeRefreshKey((key) => key + 1);
+    return `${result.main} を ${result.old} に移し、雛形で書き直しました${result.input ? `。${result.input}` : ""}`;
+  }
+  // 生成器と愚直解を作る（D-259）。ないものだけを書き、ファイル一覧を読み直す。知らせる文を返す
+  async function makeRandomPrograms(id: ProblemId): Promise<string> {
+    if (!target || restartBlocked() !== undefined) {
+      return restartBlocked() ?? "";
+    }
+    const result = await createRandomPrograms(target, id);
+    if (result.created.length > 0) {
+      setTreeRefreshKey((key) => key + 1);
+    }
+    const parts: string[] = [];
+    if (result.created.length > 0) {
+      parts.push(`${result.created.join("、")} を作りました`);
+    }
+    if (result.existed.length > 0) {
+      parts.push(`${result.existed.join("、")} はすでにあるので、変えていません`);
+    }
+    if (result.note) {
+      parts.push(result.note);
+    }
+    return parts.join("。");
+  }
   // 順位表の設定（追跡するユーザー。Phase 31。D-253）。設定の画面に使う。表を作るときは Rust 側が読み直す
   const [standingsSettings, setStandingsSettings] = useState<StandingsSettings>(DEFAULT_STANDINGS_SETTINGS);
   // 右下パネルのタブ（Phase 31。D-253）と、「追跡」のコンテストごとの表（保存しない）
@@ -2025,6 +2093,8 @@ function App() {
               loggedIn={session?.loggedIn ?? false}
               current={currentProblem}
               onSelect={showProblem}
+              marks={marks}
+              onRetry={changeRetry}
             />
           )}
           {extraActive === null && activeTab?.readOnly && (
@@ -2112,6 +2182,12 @@ function App() {
             canCreate={folderProblem === null || unlinked}
             onPackageCreated={handlePackagesCreated}
             settings={problemSettings}
+            marks={marks}
+            onMark={changeMark}
+            onRetry={changeRetry}
+            folderBlocked={restartBlocked()}
+            onRestart={restartProblem}
+            onMakeRandom={makeRandomPrograms}
           />
           </PaneBoundary>
         </section>

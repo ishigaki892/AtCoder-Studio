@@ -15,7 +15,7 @@ use std::process::Command;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use dom_query::Document;
+use dom_query::{Document, Selection};
 use serde::{Deserialize, Serialize};
 
 use crate::session::{Client, NOT_LOGGED_IN};
@@ -37,14 +37,7 @@ pub struct ProblemId {
 impl ProblemId {
     // URL やファイル名に使うので、英小文字・数字・`_`・`-` だけを許す
     pub fn new(contest: &str, task: &str) -> Result<Self, String> {
-        let valid = |id: &str| {
-            !id.is_empty()
-                && id.len() <= 64
-                && id
-                    .bytes()
-                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
-        };
-        if !valid(contest) || !valid(task) {
+        if !valid_id(contest) || !valid_id(task) {
             return Err("コンテスト・問題の ID が正しくありません".to_string());
         }
         Ok(ProblemId {
@@ -60,6 +53,15 @@ impl ProblemId {
             self.contest, self.task
         )
     }
+}
+
+// コンテスト・問題の ID の形（英小文字・数字・`_`・`-`、64 文字まで）。自力・解説の記録のキーにも使う（D-257）
+pub fn valid_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 64
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
 }
 
 // 読み取った問題
@@ -195,6 +197,21 @@ fn squash(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+// 問題文の区画（D-256）：見出し（h3）ごとに、その h3 の親の要素が、その h3 だけを含むなら、それを区画とする
+// （その h3 だけを含む、いちばん近い祖先の要素）。見出しの文字（空白をまとめたもの）と区画の要素を、問題文の順に返す。
+// 今の問題と abc020・abc041 の形は section、abc001 の形（div.part > h3 と section が並ぶ）は div.part になる。
+// 同じ親に h3 が並ぶページは、その区画を読めない（docs/phase32/01-pre-start.md §3.2）
+pub(crate) fn sections<'a>(root: &Selection<'a>) -> Vec<(String, Selection<'a>)> {
+    root.select("h3")
+        .nodes()
+        .iter()
+        .filter_map(|h3| {
+            let block = Selection::from(h3.parent()?);
+            (block.select("h3").length() == 1).then(|| (squash(h3.text().as_ref()), block))
+        })
+        .collect()
+}
+
 // 問題ページの HTML から問題を読み取る（ページの作りは 01 §2）
 pub fn parse_problem(html: &str) -> Result<Problem, String> {
     let document = Document::from(html);
@@ -228,8 +245,12 @@ pub fn parse_problem(html: &str) -> Result<Problem, String> {
     let time_limit = value(time_part);
     let memory_limit = value(memory_part);
 
-    // 問題文（日本語）
-    let statement = document.select("#task-statement .lang-ja");
+    // 問題文（日本語）。古い ABC（ABC001〜041 など）は日本語だけで lang-ja がないので、最初の #task-statement を使う
+    // （abc020 などは #task-statement が入れ子になっているので、外側の 1 つだけ。D-256）
+    let mut statement = document.select("#task-statement .lang-ja");
+    if !statement.exists() {
+        statement = document.select("#task-statement").first();
+    }
     if !statement.exists() {
         return Err(
             "問題文（日本語）が見つかりません（ページの作りが変わった可能性があります）"
@@ -243,8 +264,7 @@ pub fn parse_problem(html: &str) -> Result<Problem, String> {
     // 2026-10-25 に、保存した問題で確かめた）ので、id では探さない
     let mut inputs: BTreeMap<u32, String> = BTreeMap::new();
     let mut outputs: BTreeMap<u32, String> = BTreeMap::new();
-    for section in statement.select("section").iter() {
-        let heading = squash(section.select("h3").first().text().as_ref());
+    for (heading, section) in sections(&statement) {
         let (found, rest) = if let Some(rest) = heading.strip_prefix("入力例") {
             (&mut inputs, rest)
         } else if let Some(rest) = heading.strip_prefix("出力例") {
@@ -304,10 +324,9 @@ pub struct Tolerance {
 // 「絶対誤差」「相対誤差」のどちらも書いていなければ、両方とする【推測】
 pub fn output_tolerance(statement_html: &str) -> Option<Tolerance> {
     let document = Document::from(statement_html);
-    let section = document
-        .select("section")
-        .iter()
-        .find(|section| squash(section.select("h3").first().text().as_ref()) == "出力")?;
+    let (_, section) = sections(&document.select("body"))
+        .into_iter()
+        .find(|(heading, _)| heading == "出力")?;
     let text = squash(section.text().as_ref());
     if !text.contains("誤差") {
         return None;
@@ -1052,6 +1071,237 @@ mod tests {
         assert_eq!(
             editorial_url(&id),
             "https://atcoder.jp/contests/abc481/tasks/abc481_d/editorial?lang=ja"
+        );
+    }
+
+    // 古い ABC の 3 通りの作り（D-256。2026-11-12 に公開ページを 1 回ずつ読んで確かめた形を、短く写したもの）。
+    // どれも lang-ja がない。abc001 は見出しが section の外（div.part > h3 と section が並ぶ）で、「問題文」の section が閉じていない
+    fn old_page(statement: &str) -> String {
+        format!(
+            r#"<html><body>
+<span class="h2">
+    A - 古い問題
+    <a class="btn btn-default btn-sm" href="/contests/abc001/tasks/abc001_1/editorial">解説</a>
+</span>
+<p>実行時間制限: 2 sec / メモリ制限: 64 MiB</p>
+<div id="task-statement">{statement}</div>
+</body></html>"#
+        )
+    }
+
+    const OLD_ABC001: &str = r#"
+<div class="part">
+<h4>注意</h4>
+<p><b>この問題は古い問題です。</b></p>
+<h3>問題文</h3>
+<section>
+積雪深 <var>H_1</var> と <var>H_2</var> の差を出力してください。<br />
+</div>
+<hr />
+<div class="io-style">
+<div class="part">
+<h3>入力</h3>
+<section>
+入力は以下の形式で標準入力から与えられる。
+<pre>
+<var>H_1</var>
+<var>H_2</var>
+</pre>
+</section>
+</div>
+<div class="part">
+<h3>出力</h3>
+<section>
+差を出力せよ。絶対誤差が <var>10^{-6}</var> 以下であれば正解とする。
+</section>
+</div>
+</div>
+<hr />
+<div class="part">
+<h3>入力例 1</h3>
+<section>
+<pre class="prettyprint linenums">
+15
+10
+</pre>
+</section>
+</div>
+<div class="part">
+<h3>出力例 1</h3>
+<section>
+<pre class="prettyprint linenums">
+5
+</pre>
+<ul><li><var>15-10</var> <var>=5</var></li></ul>
+</section>
+</div>
+<div class="part">
+<h3>入力例 2</h3>
+<section>
+<pre class="prettyprint linenums">
+0
+0
+</pre>
+</section>
+</div>
+<div class="part">
+<h3>出力例 2</h3>
+<section>
+<pre class="prettyprint linenums">
+0
+</pre>
+</section>
+</div>"#;
+
+    const OLD_ABC020: &str = r#"
+<div id="task-statement">
+  <div id="task-statement">
+<div class="part">
+<section>
+<h3>問題文</h3>
+<p>整数 <var>Q</var> が与えられます。</p>
+</section>
+</div>
+<hr />
+<div class="io-style">
+<div class="part">
+<section>
+<h3>入力</h3>
+<p>入力は以下の形式で標準入力から与えられる。</p>
+<pre>
+<var>Q</var>
+</pre>
+</section>
+</div>
+</div>
+<hr />
+<div class="part">
+<section>
+<h3>入力例1</h3>
+<pre>
+1
+</pre>
+</section>
+</div>
+<div class="part">
+<section>
+<h3>出力例1</h3>
+<pre>
+ABC
+</pre>
+</section>
+</div>
+  </div>
+</div>"#;
+
+    const OLD_ABC041: &str = r#"
+<section>
+<h3>問題文</h3>
+<p>文字列 <var>s</var> と整数 <var>i</var> が与えられます。</p>
+</section>
+<hr />
+<section>
+<h3>制約</h3>
+<ul><li><var>1 ≦ i ≦ |s| ≦ 100</var></li></ul>
+</section>
+<hr />
+<section>
+<h3>入力</h3>
+<p>入力は以下の形式で標準入力から与えられる。</p>
+<pre>
+<var>s</var>
+<var>i</var>
+</pre>
+</section>
+<section>
+<h3>入力例1</h3>
+<pre>
+atcoder
+3
+</pre>
+</section>
+<section>
+<h3>出力例1</h3>
+<pre>
+c
+</pre>
+</section>"#;
+
+    fn samples(pairs: &[(&str, &str)]) -> Vec<Sample> {
+        pairs
+            .iter()
+            .map(|(input, output)| Sample {
+                input: input.to_string(),
+                output: output.to_string(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn parses_old_abc_pages_without_lang_ja() {
+        let problem = parse_problem(&old_page(OLD_ABC001)).unwrap();
+        assert_eq!(problem.title, "A - 古い問題");
+        assert_eq!(problem.time_limit, "2 sec");
+        assert_eq!(problem.memory_limit, "64 MiB");
+        assert!(problem.statement_html.contains("積雪深"));
+        assert_eq!(
+            problem.samples,
+            samples(&[("15\n10\n", "5\n"), ("0\n0\n", "0\n")])
+        );
+
+        // #task-statement の入れ子は、外側の 1 つだけ（問題文が重ならない）
+        let problem = parse_problem(&old_page(OLD_ABC020)).unwrap();
+        assert_eq!(problem.statement_html.matches("問題文").count(), 1);
+        assert_eq!(problem.samples, samples(&[("1\n", "ABC\n")]));
+
+        let problem = parse_problem(&old_page(OLD_ABC041)).unwrap();
+        assert_eq!(problem.samples, samples(&[("atcoder\n3\n", "c\n")]));
+    }
+
+    #[test]
+    fn finds_sections_of_every_shape() {
+        for (page, headings) in [
+            (
+                OLD_ABC001,
+                &[
+                    "問題文",
+                    "入力",
+                    "出力",
+                    "入力例 1",
+                    "出力例 1",
+                    "入力例 2",
+                    "出力例 2",
+                ][..],
+            ),
+            (OLD_ABC020, &["問題文", "入力", "入力例1", "出力例1"][..]),
+            (
+                OLD_ABC041,
+                &["問題文", "制約", "入力", "入力例1", "出力例1"][..],
+            ),
+        ] {
+            let document = Document::from(page);
+            let found: Vec<String> = sections(&document.select("body"))
+                .into_iter()
+                .map(|(heading, _)| heading)
+                .collect();
+            assert_eq!(found, headings);
+        }
+        // 同じ親に h3 が並ぶときは、区画にしない
+        let document =
+            Document::from("<div><h3>入力例 1</h3><pre>1</pre><h3>出力例 1</h3><pre>1</pre></div>");
+        assert!(sections(&document.select("body")).is_empty());
+    }
+
+    #[test]
+    fn reads_tolerance_from_old_pages() {
+        let problem = parse_problem(&old_page(OLD_ABC001)).unwrap();
+        assert_eq!(
+            output_tolerance(&problem.statement_html),
+            Some(Tolerance {
+                abs: true,
+                rel: false,
+                exponent: 6
+            })
         );
     }
 }

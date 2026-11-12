@@ -1960,6 +1960,53 @@ button.breadcrumb:focus-visible {
   font-weight: 600;
 }
 
+/* 自力 AC・解説 AC の記録と解き直しの印の切り替え（Phase 33・34。D-257・D-258）。制限の行の下に、右に寄せて置く
+   （float で制限の行の右端に置くと、行の高さに数えられず、下の線に重なった。2026-11-12、ユーザーの指摘） */
+.problem-marks {
+  display: flex;
+  justify-content: flex-end;
+  gap: 4px;
+  margin: 4px 0 2px;
+}
+
+.problem-mark {
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: transparent;
+  color: var(--fg-secondary);
+  font: inherit;
+  cursor: pointer;
+}
+
+.problem-mark:hover {
+  border-color: var(--accent-focus);
+}
+
+.problem-mark.pressed {
+  color: var(--fg-strong);
+}
+
+.problem-mark.pressed.mark-self {
+  border-color: var(--verdict-ac);
+  background: var(--past-accepted-bg);
+}
+
+.problem-mark.pressed.mark-editorial {
+  border-color: rgb(166, 136, 216);
+  background: var(--past-editorial-bg);
+}
+
+/* 解き直しの印（D-258）。表のますの三角と同じ色。「自力」「解説」から少し離す */
+.problem-marks > .problem-mark:last-child {
+  margin-left: 6px;
+}
+
+.problem-mark.pressed.mark-retry {
+  border-color: var(--past-retry-mark);
+  color: var(--fg-strong);
+}
+
 .problem-statement h3 {
   margin: 16px 0 6px;
   color: var(--fg-strong);
@@ -2982,6 +3029,56 @@ body.hide-breadcrumbs .breadcrumbs {
 
 .past-tried {
   background: var(--past-tried-bg);
+}
+
+.past-editorial {
+  background: var(--past-editorial-bg);
+}
+
+/* 解き直しの印（Phase 34。D-258）。ますの右上の小さな三角 */
+.past-cell.past-retry {
+  position: relative;
+}
+
+.past-cell.past-retry::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  right: 0;
+  border-top: 7px solid var(--past-retry-mark);
+  border-left: 7px solid transparent;
+  pointer-events: none;
+}
+
+/* 「解き直し」の一覧 */
+.retry-table td {
+  padding: 2px 8px;
+}
+
+.retry-table .retry-problem {
+  padding: 0;
+  text-align: left;
+}
+
+.retry-table .retry-problem button {
+  width: 100%;
+  padding: 2px 8px;
+  border: none;
+  background: transparent;
+  color: var(--fg-default);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.retry-table .retry-problem button:hover {
+  outline: 1px solid var(--accent-focus);
+  outline-offset: -1px;
+}
+
+.retry-table tr.current .retry-problem button {
+  outline: 2px solid var(--accent-focus);
+  outline-offset: -2px;
 }
 
 .past-cell.current button {

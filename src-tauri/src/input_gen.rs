@@ -16,7 +16,7 @@ use dom_query::{Document, NodeRef};
 use serde::Serialize;
 
 use crate::language::Language;
-use crate::problem::Sample;
+use crate::problem::{self, Sample};
 
 // <var> の境目（間の空白ではない区切り）
 const VAR_BREAK: char = '\u{1}';
@@ -511,6 +511,8 @@ struct Format {
     used: Vec<String>,
     // 読めなかった（クエリ・読めない行）ときのコメントと注意
     stop: Option<Stop>,
+    // 間なしの格子の幅（items の番号ごと。生成器の雛形で使う。Phase 35。D-259）
+    widths: HashMap<usize, Len>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -582,6 +584,7 @@ fn read_format(lines: &[Vec<Item>], types: &Types) -> Format {
                     Kind::Array(rows, Box::new(Kind::Array(cols, Box::new(Kind::Value(ty)))))
                 } else {
                     // 間なしの格子は、行ごとに文字の並びとして読む
+                    format.widths.insert(format.items.len(), cols);
                     Kind::Array(rows, Box::new(Kind::Value(Ty::Chars)))
                 };
                 format.cpp_names.push(vec![base.clone()]);
@@ -1222,16 +1225,16 @@ pub fn generate(statement_html: &str, samples: &[Sample]) -> Result<Generated, S
 }
 
 // language の書き方で作る（C++ は宣言と cin の行。D-213。Python は行ごとに input() で読む行。D-227）
-pub fn generate_for(
-    statement_html: &str,
-    samples: &[Sample],
-    language: Language,
-) -> Result<Generated, String> {
+// 1 つの pre を行に分けたもの
+type PreLines = Vec<Vec<Item>>;
+
+// 問題文の「入力」の区画の pre（行に分けたもの）と、「制約」の区画の箇条書き。「入力」の pre がなければ Err
+fn read_sections(statement_html: &str) -> Result<(Vec<PreLines>, Vec<String>), String> {
     let document = Document::from(statement_html);
-    let mut pres: Vec<Vec<Vec<Item>>> = Vec::new();
+    let mut pres: Vec<PreLines> = Vec::new();
     let mut constraints: Vec<String> = Vec::new();
-    for section in document.select("section").iter() {
-        let heading = squash(section.select("h3").first().text().as_ref());
+    // 区画の見分け方は問題文の読み取りと同じ（D-256）
+    for (heading, section) in problem::sections(&document.select("body")) {
         if heading == "入力" && pres.is_empty() {
             pres = section
                 .select("pre")
@@ -1247,9 +1250,19 @@ pub fn generate_for(
                 .collect();
         }
     }
-    let Some(first) = pres.first() else {
+    if pres.is_empty() {
         return Err("問題文に「入力」の形式が見つかりません".to_string());
-    };
+    }
+    Ok((pres, constraints))
+}
+
+pub fn generate_for(
+    statement_html: &str,
+    samples: &[Sample],
+    language: Language,
+) -> Result<Generated, String> {
+    let (pres, constraints) = read_sections(statement_html)?;
+    let first = &pres[0];
     let mut bases = bases_of(first);
     if let Some(second) = pres.get(1) {
         bases.extend(bases_of(second));
@@ -1438,6 +1451,516 @@ pub fn generate_for(
 // ---- C++ の書き方（Phase 17 作業 8。D-213） ----
 
 // C++ の予約語（C++23。代わりの綴り `and` などを含む）
+// ---- 生成器の雛形のための読み取り（Phase 35 作業 1。D-259） ----
+
+// 値の種類（整数・実数・1 文字・文字列）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ShapeValue {
+    Int,
+    Real,
+    Char,
+    Str,
+}
+
+impl ShapeValue {
+    fn of(ty: Ty) -> Self {
+        match ty {
+            Ty::Usize | Ty::I64 => ShapeValue::Int,
+            Ty::F64 => ShapeValue::Real,
+            Ty::Char => ShapeValue::Char,
+            Ty::Chars => ShapeValue::Str,
+        }
+    }
+}
+
+// 長さ：coef × name + offset（name は問題文のままの名前。なければ offset だけ）
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ShapeLen {
+    pub name: Option<String>,
+    pub coef: i64,
+    pub offset: i64,
+}
+
+impl ShapeLen {
+    fn of(len: &Len) -> Self {
+        ShapeLen {
+            name: len.cpp.clone(),
+            coef: len.coef,
+            offset: len.offset,
+        }
+    }
+}
+
+// 1 つの値。name は問題文のままの名前（例：N・S_X）、base は制約で使う名前（添字を外したもの。例：S）
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Field {
+    pub name: String,
+    pub base: String,
+    pub value: ShapeValue,
+}
+
+impl Field {
+    fn new(name: &str, ty: Ty) -> Self {
+        Field {
+            name: name.to_string(),
+            base: name.split('_').next().unwrap_or(name).to_string(),
+            value: ShapeValue::of(ty),
+        }
+    }
+}
+
+// 入力の 1 つの並び
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ShapeItem {
+    // 1 行の値の並び（N K）
+    Line(Vec<Field>),
+    // 横の列（A_1 … A_N）
+    Row {
+        field: Field,
+        len: ShapeLen,
+    },
+    // 縦の並び（1 行に 1 つ、または組 1 つ）
+    Column {
+        fields: Vec<Field>,
+        len: ShapeLen,
+    },
+    // 格子。spaced でなければ、1 行が cols 文字の文字列
+    Grid {
+        field: Field,
+        rows: ShapeLen,
+        cols: ShapeLen,
+        spaced: bool,
+    },
+}
+
+// 上限：数か、変数（制約で使う名前）。変数の上限は「その変数 + offset」（未満なら −1）
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Upper {
+    Number(i128),
+    Var(String, i128),
+}
+
+// 制約から読んだ範囲（読めたものだけ）
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct Bound {
+    pub lower: Option<i128>,
+    pub upper: Option<Upper>,
+}
+
+// 生成器の雛形に使う、入力の形と制約
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct Shape {
+    // テストケースの数（複数のテストケースのとき）
+    pub cases: Option<Field>,
+    pub items: Vec<ShapeItem>,
+    // 読めなかったところ（コメントに書く。例：クエリ（q 個））
+    pub stop: Option<String>,
+    // 制約で使う名前ごとの範囲
+    pub bounds: HashMap<String, Bound>,
+    // 制約で使う名前ごとの、文字の選択肢（例：. と #）
+    pub chars: HashMap<String, Vec<String>>,
+    // 負の値がありうると読めた名前（下限の数が読めないとき、−10〜10 にする）
+    pub negative: HashSet<String>,
+    // 自動では満たさない制約の行（コメントに書く）
+    pub unmet: Vec<String>,
+}
+
+// 関係の記号の目印（≦ と <）
+const LE: char = '\u{2}';
+const LT: char = '\u{3}';
+
+// 不等号を目印にする。`\le`・`\leq`・`\leqq`・`≦`・`≤` は LE、`\lt`・`<` は LT。ほかの命令（`\left` など）はそのまま
+fn mark_relations(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut result = String::new();
+    let mut i = 0;
+    while i < chars.len() {
+        match chars[i] {
+            '\\' => {
+                let mut j = i + 1;
+                while j < chars.len() && chars[j].is_ascii_alphabetic() {
+                    j += 1;
+                }
+                let command: String = chars[i + 1..j].iter().collect();
+                match command.as_str() {
+                    "le" | "leq" | "leqq" | "leqslant" => result.push(LE),
+                    "lt" => result.push(LT),
+                    _ => result.extend(&chars[i..j]),
+                }
+                i = j.max(i + 1);
+            }
+            '≦' | '≤' => {
+                result.push(LE);
+                i += 1;
+            }
+            '<' => {
+                result.push(LT);
+                i += 1;
+            }
+            c => {
+                result.push(c);
+                i += 1;
+            }
+        }
+    }
+    result
+}
+
+// 整数の数（`1`・`-1`・`10^9`・`10^{18}`・`2\times 10^5`・`2 \cdot 10^5`・`−10^9`・`100,000`）。ほかの形は None
+fn parse_number(text: &str) -> Option<i128> {
+    let text: String = text
+        .chars()
+        .filter(|c| !c.is_whitespace() && *c != ',' && *c != '{' && *c != '}')
+        .map(|c| if c == '−' { '-' } else { c })
+        .collect();
+    let (negative, text) = match text.strip_prefix('-') {
+        Some(rest) => (true, rest.to_string()),
+        None => (false, text),
+    };
+    let power = |text: &str| -> Option<i128> {
+        let exponent: u32 = text.strip_prefix("10^")?.parse().ok()?;
+        (exponent <= 18).then(|| 10i128.pow(exponent))
+    };
+    let value = if is_const(&text) && text.len() <= 19 {
+        text.parse().ok()?
+    } else if let Some(value) = power(&text) {
+        value
+    } else {
+        let (coef, rest) = text
+            .split_once("\\times")
+            .or_else(|| text.split_once("\\cdot"))
+            .or_else(|| text.split_once('×'))?;
+        if !is_const(coef) || coef.len() > 6 {
+            return None;
+        }
+        coef.parse::<i128>().ok()? * power(rest)?
+    };
+    Some(if negative { -value } else { value })
+}
+
+// 制約の行から、名前ごとの下限・上限を読む（最初に読めたものを使う）。
+// `1 \leq N \leq 2\times 10^5`・`1 \leq X_i < Y_i \leq N`・`0 \leq A_i, B_i \leq 100` の形。かっこの中は別の不等式として読む
+fn read_bounds(constraints: &[String], bases: &HashSet<String>) -> HashMap<String, Bound> {
+    let mut bounds: HashMap<String, Bound> = HashMap::new();
+    for line in constraints {
+        let marked = mark_relations(&strip_subscripts(line));
+        for chain in marked.split(['(', ')', '（', '）', '．', '。']) {
+            let mut segments = Vec::new();
+            let mut strict = Vec::new();
+            let mut current = String::new();
+            for c in chain.chars() {
+                if c == LE || c == LT {
+                    segments.push(std::mem::take(&mut current));
+                    strict.push(c == LT);
+                } else {
+                    current.push(c);
+                }
+            }
+            segments.push(current);
+            if segments.len() < 2 {
+                continue;
+            }
+            for k in 0..segments.len() {
+                let named: Vec<&String> = bases
+                    .iter()
+                    .filter(|base| mentions(&segments[k], base))
+                    .collect();
+                if named.is_empty() {
+                    continue;
+                }
+                let lower = (k > 0)
+                    .then(|| {
+                        let left = segments[k - 1].rsplit([',', '、']).next()?;
+                        parse_number(left).map(|n| if strict[k - 1] { n + 1 } else { n })
+                    })
+                    .flatten();
+                let upper = (k + 1 < segments.len())
+                    .then(|| {
+                        let right = segments[k + 1].split([',', '、']).next()?.trim();
+                        if let Some(n) = parse_number(right) {
+                            return Some(Upper::Number(if strict[k] { n - 1 } else { n }));
+                        }
+                        bases
+                            .contains(right)
+                            .then(|| Upper::Var(right.to_string(), if strict[k] { -1 } else { 0 }))
+                    })
+                    .flatten();
+                for base in named {
+                    let bound = bounds.entry(base.clone()).or_default();
+                    if bound.lower.is_none() {
+                        bound.lower = lower;
+                    }
+                    if bound.upper.is_none()
+                        && upper.as_ref().is_none_or(
+                            |upper| !matches!(upper, Upper::Var(name, _) if name == base),
+                        )
+                    {
+                        bound.upper = upper.clone();
+                    }
+                }
+            }
+        }
+    }
+    bounds
+}
+
+// 文字の選択肢（「S_{i,j} は . または # である」「c は L, R のいずれか」「英小文字からなる」）。読めなければ入れない
+fn read_char_sets(constraints: &[String], bases: &HashSet<String>) -> HashMap<String, Vec<String>> {
+    let mut sets = HashMap::new();
+    for line in constraints {
+        let line = strip_subscripts(line);
+        let Some(position) = line.find('は') else {
+            continue;
+        };
+        let (head, tail) = line.split_at(position);
+        let tail = &tail['は'.len_utf8()..];
+        let mut set: Vec<String> = Vec::new();
+        if let Some(list) = tail
+            .split("のいずれか")
+            .next()
+            .filter(|_| tail.contains("のいずれか"))
+        {
+            set = list
+                .split([',', '、'])
+                .flat_map(|part| part.split("または"))
+                .flat_map(|part| part.split('と'))
+                .map(str::trim)
+                .filter(|part| !part.is_empty() && !part.chars().any(|c| c.is_ascii_digit()))
+                .map(str::to_string)
+                .collect();
+        } else {
+            // 1 文字の記号（`.`・`#`・`?` など）
+            for token in tail.split([' ', ',', '、']) {
+                let mut chars = token.chars();
+                if let (Some(c), None) = (chars.next(), chars.next())
+                    && c.is_ascii_punctuation()
+                    && !set.contains(&c.to_string())
+                {
+                    set.push(c.to_string());
+                }
+            }
+            if tail.contains("英小文字") {
+                set.extend(["a", "b", "c"].map(str::to_string));
+            }
+            if tail.contains("英大文字") {
+                set.extend(["A", "B", "C"].map(str::to_string));
+            }
+        }
+        if set.is_empty() {
+            continue;
+        }
+        for base in bases.iter().filter(|base| mentions(head, base)) {
+            sets.entry(base.clone()).or_insert_with(|| set.clone());
+        }
+    }
+    sets
+}
+
+// 自動では満たさない制約（相異なる・順列・木・連結など）の行
+const UNMET_WORDS: &[&str] = &[
+    "異なる",
+    "順列",
+    "木",
+    "連結",
+    "単純",
+    "昇順",
+    "降順",
+    "単調",
+    "重複",
+    "多重辺",
+    "自己ループ",
+    "保証",
+    "\\neq",
+    "\\ne ",
+    "≠",
+    "互いに素",
+    "回文",
+    "素数",
+];
+
+fn unmet_constraints(constraints: &[String]) -> Vec<String> {
+    constraints
+        .iter()
+        .filter(|line| UNMET_WORDS.iter().any(|word| line.contains(word)))
+        .cloned()
+        .collect()
+}
+
+// 生成器の雛形のための読み取りの途中（read_shape と、テストの確かめで使う）
+struct ShapeFormat {
+    constraints: Vec<String>,
+    bases: HashSet<String>,
+    chars: HashMap<String, Vec<String>>,
+    negative: HashSet<String>,
+    cases: Option<Field>,
+    main: Option<Vec<(String, Kind)>>,
+    body: Format,
+    place: &'static str,
+}
+
+fn shape_format(statement_html: &str) -> Result<ShapeFormat, String> {
+    let (pres, constraints) = read_sections(statement_html)?;
+    let mut bases = bases_of(&pres[0]);
+    if let Some(second) = pres.get(1) {
+        bases.extend(bases_of(second));
+    }
+    let mut types = read_types(&constraints, &bases);
+    // 文字の選択肢が読めた変数は、型が決まっていなければ文字（すべて 1 文字なら char、ほかは文字列）にする
+    // （「S_{i,j} は . または # である」。生成器の雛形のときだけ。input! の型の決め方は変えない）
+    let chars = read_char_sets(&constraints, &bases);
+    for (base, set) in &chars {
+        types
+            .text
+            .entry(base.clone())
+            .or_insert(if set.iter().all(|c| c.chars().count() == 1) {
+                Ty::Char
+            } else {
+                Ty::Chars
+            });
+    }
+    let top = read_format(&pres[0], &types);
+    let (cases, main, body, place) = match &top.stop {
+        Some(Stop::Cases(count))
+            if top.items.len() == 1 && top.items[0].0 == *count && pres.len() >= 2 =>
+        {
+            let name = top.cpp_names[0][0].clone();
+            (
+                Some(Field::new(&name, Ty::Usize)),
+                Some(vec![(count.clone(), Kind::Value(Ty::Usize))]),
+                read_format(&pres[1], &types),
+                "1 ケースの形式",
+            )
+        }
+        _ => (None, None, top, "入力の形式"),
+    };
+    Ok(ShapeFormat {
+        constraints,
+        bases,
+        chars,
+        negative: types.negative,
+        cases,
+        main,
+        body,
+        place,
+    })
+}
+
+// 生成器が作った入力が、生成器と同じ読み方（文字の選択肢を使う）で形式どおりか（テストで使う）
+#[cfg(test)]
+pub(crate) fn matches_shape(statement_html: &str, input: &str) -> bool {
+    let Ok(format) = shape_format(statement_html) else {
+        return false;
+    };
+    let complete = format.body.stop.is_none();
+    let ok = |items: &[(String, Kind)]| {
+        check_sample(format.main.as_deref(), items, complete, input).is_ok()
+    };
+    ok(&format.body.items) || char_grid_as_rows(&format.body.items).is_some_and(|rows| ok(&rows))
+}
+
+// 生成器の雛形のために、問題文から入力の形と制約を読む（D-259）。「入力」の形式がなければ Err。
+// 1 文字の格子が、形式では間ありでも入力例が行ごとの文字列なら、間なしにする（input! と同じ。samples で確かめる）
+pub(crate) fn read_shape(statement_html: &str, samples: &[Sample]) -> Result<Shape, String> {
+    let ShapeFormat {
+        constraints,
+        bases,
+        chars,
+        negative,
+        cases,
+        main,
+        body,
+        place,
+    } = shape_format(statement_html)?;
+    let complete = body.stop.is_none();
+    let matches_all = |items: &[(String, Kind)]| {
+        !samples.is_empty()
+            && samples
+                .iter()
+                .all(|s| check_sample(main.as_deref(), items, complete, &s.input).is_ok())
+    };
+    let rows_form = char_grid_as_rows(&body.items)
+        .is_some_and(|rows| !matches_all(&body.items) && matches_all(&rows));
+
+    let mut items: Vec<ShapeItem> = Vec::new();
+    for (index, ((_, kind), layout)) in body.items.iter().zip(&body.layouts).enumerate() {
+        let names = &body.cpp_names[index];
+        let item = match (layout, kind) {
+            (Layout::Line(line), Kind::Value(ty)) => {
+                let field = Field::new(&names[0], *ty);
+                // 同じ行の値は、前の並びに足す
+                if let (Some(ShapeItem::Line(fields)), Some(Layout::Line(previous))) = (
+                    items.last_mut(),
+                    index.checked_sub(1).map(|k| body.layouts[k]),
+                ) && previous == *line
+                {
+                    fields.push(field);
+                    continue;
+                }
+                ShapeItem::Line(vec![field])
+            }
+            (Layout::Row, Kind::Array(len, inner)) => match &**inner {
+                Kind::Value(ty) => ShapeItem::Row {
+                    field: Field::new(&names[0], *ty),
+                    len: ShapeLen::of(len),
+                },
+                _ => continue,
+            },
+            (Layout::Column, Kind::Array(len, inner)) => {
+                let tys = match &**inner {
+                    Kind::Value(ty) => vec![*ty],
+                    Kind::Tuple(tys) => tys.clone(),
+                    Kind::Array(..) => continue,
+                };
+                ShapeItem::Column {
+                    fields: names
+                        .iter()
+                        .zip(tys)
+                        .map(|(name, ty)| Field::new(name, ty))
+                        .collect(),
+                    len: ShapeLen::of(len),
+                }
+            }
+            (Layout::Grid, Kind::Array(rows, inner)) => match &**inner {
+                Kind::Array(cols, cell) => match &**cell {
+                    Kind::Value(ty) => ShapeItem::Grid {
+                        field: Field::new(&names[0], *ty),
+                        rows: ShapeLen::of(rows),
+                        cols: ShapeLen::of(cols),
+                        spaced: !(rows_form && *ty == Ty::Char),
+                    },
+                    _ => continue,
+                },
+                Kind::Value(Ty::Chars) => match body.widths.get(&index) {
+                    Some(cols) => ShapeItem::Grid {
+                        field: Field::new(&names[0], Ty::Char),
+                        rows: ShapeLen::of(rows),
+                        cols: ShapeLen::of(cols),
+                        spaced: false,
+                    },
+                    None => continue,
+                },
+                _ => continue,
+            },
+            _ => continue,
+        };
+        items.push(item);
+    }
+    let stop = body.stop.as_ref().map(|stop| match stop {
+        Stop::Query(count) => format!("クエリ（{count} 個）"),
+        Stop::Cases(_) => "テストケースの形式".to_string(),
+        Stop::Unreadable(line) => format!("{place}の {line} 行目から先"),
+    });
+    Ok(Shape {
+        cases,
+        items,
+        stop,
+        bounds: read_bounds(&constraints, &bases),
+        chars,
+        negative,
+        unmet: unmet_constraints(&constraints),
+    })
+}
+
 const CPP_KEYWORDS: &[&str] = &[
     "alignas",
     "alignof",
@@ -2269,6 +2792,21 @@ mod tests {
              <div class=\"part\"><section><h3>入力</h3><p>入力は以下の形式で与えられる。</p>{pres}</section></div>\
              <div class=\"part\"><section><h3>入力例 1</h3><pre>1</pre></section></div>"
         )
+    }
+
+    // 古い ABC の形（見出しが section の外。lang-ja も「制約」もない。D-256）でも、「入力」の形式を読める。
+    // 制約がないので型は決まらず i64 にし、注意を出す
+    #[test]
+    fn reads_the_format_of_old_pages() {
+        let html = "<div class=\"part\">\n<h3>入力</h3>\n<section>\n入力は以下の形式で標準入力から与えられる。\n<pre>\n<var>A</var> <var>B</var>\n</pre>\n</section>\n</div>";
+        let generated = generate(html, &[sample("15 10\n")]).unwrap();
+        assert_eq!(generated.solve, ["a: i64,", "b: i64,"]);
+        assert!(generated.complete);
+        assert!(!generated.notes.is_empty());
+        assert_eq!(
+            (generated.samples_checked, generated.samples_matched),
+            (1, 1)
+        );
     }
 
     #[test]
@@ -3226,5 +3764,75 @@ fn main() {
         // Rust では fn・n で別の名前なので、知らせない
         let generated = generate(&html, &[]).unwrap();
         assert!(!generated.notes.iter().any(|note| note.contains("2 度")));
+    }
+
+    // 生成器の雛形のための読み取り（Phase 35。D-259）
+    #[test]
+    fn reads_numbers_bounds_and_char_sets() {
+        assert_eq!(parse_number("1"), Some(1));
+        assert_eq!(parse_number(" -10^9 "), Some(-1_000_000_000));
+        assert_eq!(parse_number("−10^{9}"), Some(-1_000_000_000));
+        assert_eq!(parse_number("2\\times 10^5"), Some(200_000));
+        assert_eq!(parse_number("2 \\cdot 10^{5}"), Some(200_000));
+        assert_eq!(parse_number("100,000"), Some(100_000));
+        assert_eq!(parse_number("10^{18}"), Some(1_000_000_000_000_000_000));
+        assert_eq!(parse_number("N"), None);
+        assert_eq!(parse_number("10^9+7"), None);
+        assert_eq!(parse_number("\\frac{N(N-1)}{2}"), None);
+
+        let bases: HashSet<String> = ["N", "M", "A", "B", "X", "K"].map(str::to_string).into();
+        let lines: Vec<String> = [
+            "1 \\leq N, M \\leq 2\\times 10^5",
+            "1 \\leq A_i \\lt B_i \\leq N",
+            "0 \\leq X < 10 (1 \\leq K \\leq N)",
+            "\\left( 3 \\right)",
+        ]
+        .map(str::to_string)
+        .into();
+        let bounds = read_bounds(&lines, &bases);
+        let bound = |lower, upper| Bound { lower, upper };
+        assert_eq!(bounds["N"], bound(Some(1), Some(Upper::Number(200_000))));
+        assert_eq!(bounds["M"], bound(Some(1), Some(Upper::Number(200_000))));
+        assert_eq!(
+            bounds["A"],
+            bound(Some(1), Some(Upper::Var("B".to_string(), -1)))
+        );
+        // 左が変数（A_i < B_i）の下限は読まない（生成器では既定の 1 になる）
+        assert_eq!(
+            bounds["B"],
+            bound(None, Some(Upper::Var("N".to_string(), 0)))
+        );
+        assert_eq!(bounds["X"], bound(Some(0), Some(Upper::Number(9))));
+        assert_eq!(
+            bounds["K"],
+            bound(Some(1), Some(Upper::Var("N".to_string(), 0)))
+        );
+        // \left は不等号と読まない
+        assert_eq!(
+            mark_relations("\\left( 3 \\le N"),
+            format!("\\left( 3 {LE} N")
+        );
+
+        let bases: HashSet<String> = ["S", "C", "T", "D"].map(str::to_string).into();
+        let lines: Vec<String> = [
+            "S_{i,j} は . または # である",
+            "C は L, R のいずれかである",
+            "T は英小文字と ? からなる文字列",
+            "D は Yes と No のいずれか",
+        ]
+        .map(str::to_string)
+        .into();
+        let sets = read_char_sets(&lines, &bases);
+        assert_eq!(sets["S"], [".", "#"]);
+        assert_eq!(sets["C"], ["L", "R"]);
+        assert_eq!(sets["T"], ["?", "a", "b", "c"]);
+        assert_eq!(sets["D"], ["Yes", "No"]);
+        assert_eq!(
+            unmet_constraints(&[
+                "A_i はすべて相異なる".to_string(),
+                "1 \\leq N \\leq 10".to_string()
+            ]),
+            ["A_i はすべて相異なる"]
+        );
     }
 }

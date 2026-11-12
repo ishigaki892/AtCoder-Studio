@@ -108,6 +108,10 @@ export const PROBLEM_BUTTONS = [
   // 解説の一覧を既定のブラウザで開く（Phase 25 作業 2。D-244）
   { name: "editorial", label: "解説" },
   { name: "createProblem", label: "この問題を作る" },
+  // ランダムテストの生成器と愚直解を examples/ に置く（Phase 35 作業 2。D-259）
+  { name: "makeRandom", label: "生成器と愚直解を作る" },
+  // 問題のフォルダの main を old/ に移して雛形に戻す（Phase 34 作業 3。D-258）
+  { name: "restart", label: "白紙から解き直す" },
 ] as const;
 
 export const DEFAULT_PROBLEM_SETTINGS: ProblemSettings = {

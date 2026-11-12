@@ -3,6 +3,8 @@
 // - 「問題文」「制約」の区画の数字と変数：区画に印（SECTION_CLASS）を付け、KaTeX の出力の数字・変数を CSS で色付けする
 // 無害化した後の問題文（D-113）の中だけで行い、要素は増やさない（KaTeX が作る要素にクラスを付けるだけ）
 
+import { statementSections } from "./sections";
+
 export const MOD_CLASS = "hl-mod";
 export const SECTION_CLASS = "hl-section";
 
@@ -32,10 +34,10 @@ export function trustOnlyHighlight(context: { command: string; class?: string })
   return context.command === "\\htmlClass" && context.class === MOD_CLASS;
 }
 
-// 見出しが「問題文」「制約」の区画に印を付ける
+// 見出しが「問題文」「制約」の区画に印を付ける（区画の見分け方は D-256。古い ABC は div の区画になる）
 export function markSections(container: HTMLElement) {
-  for (const section of container.querySelectorAll("section")) {
-    const title = section.querySelector("h3")?.textContent?.trim() ?? "";
+  for (const { heading, section } of statementSections(container)) {
+    const title = heading.textContent?.trim() ?? "";
     section.classList.toggle(SECTION_CLASS, SECTION_TITLES.has(title));
   }
 }

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-set-problem-mark"
+description = "Enables the set_problem_mark command without any pre-configured scope."
+commands.allow = ["set_problem_mark"]
+
+[[permission]]
+identifier = "deny-set-problem-mark"
+description = "Denies the set_problem_mark command without any pre-configured scope."
+commands.deny = ["set_problem_mark"]

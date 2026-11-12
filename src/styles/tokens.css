@@ -61,6 +61,10 @@
   /* 過去問の表のますの背景（Phase 24。D-242）。AC は緑、AC していない提出があれば黄。数字（diff の色）が読める薄さ */
   --past-accepted-bg: rgba(92, 184, 92, 0.28);
   --past-tried-bg: rgba(240, 173, 78, 0.24);
+  /* 解説 AC（Phase 33。D-257）。緑・黄と見分けやすい紫（レートの色にない色相なので、diff の数字の色とも重ならない） */
+  --past-editorial-bg: rgba(166, 136, 216, 0.34);
+  /* 解き直しの印（Phase 34。D-258）。ますの右上の三角と、問題文の欄の「解き直す」の枠 */
+  --past-retry-mark: #4fc1ff;
   /* デバッグ（D-146 2.6）。ブレークポイントの印と、止まった行の背景 */
   --debug-breakpoint: #e5534b;
   --debug-stopped-line: rgba(240, 173, 78, 0.18);

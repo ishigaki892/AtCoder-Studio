@@ -313,14 +313,17 @@ pub struct ProblemSettings {
     pub language: Language,
 }
 
-// 見出しの行に出せるボタンの名前（input! を作る・サンプルを保存・再取得・公式ページ・解説〔Phase 25。D-244〕・この問題を作る）
-pub const PROBLEM_BUTTONS: [&str; 6] = [
+// 見出しの行に出せるボタンの名前（input! を作る・サンプルを保存・再取得・公式ページ・解説〔Phase 25。D-244〕・この問題を作る・
+// 生成器と愚直解を作る〔Phase 35。D-259〕・白紙から解き直す〔Phase 34。D-258〕）
+pub const PROBLEM_BUTTONS: [&str; 8] = [
     "makeInput",
     "saveSamples",
     "refresh",
     "openPage",
     "editorial",
     "createProblem",
+    "makeRandom",
+    "restart",
 ];
 
 impl Default for ProblemSettings {

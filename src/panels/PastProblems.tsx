@@ -1,15 +1,20 @@
 // 中央の「過去問」のタブ（Phase 24 作業 2。D-242）。ABC・ARC・AGC・AWC（D-255）を切り替えて、行はコンテスト（新しい順）、
 // 列は問題の記号の表を出す。ますは AtCoder Problems の diff の色、背景で AC 状況（AC は緑、AC していない提出があれば黄）。
-// ますを押すと、その問題を問題文の欄に出す。読むのは Rust 側（src-tauri/src/atcoder_problems.rs）
+// 解説 AC（手で付けた記録。D-257）は、AC の緑の代わりに別の色。解き直しの印（D-258）は、ますの右上の三角。
+// ますを押すと、その問題を問題文の欄に出す。読むのは Rust 側（src-tauri/src/atcoder_problems.rs）。
+// 「解き直し」（D-258）は、印を付けた問題の一覧（RetryList.tsx）
 import { useEffect, useRef, useState } from "react";
 import type { ProblemId } from "../ipc/problem";
 import {
   difficultyHint,
   pastProblems,
   type PastCategory,
+  type PastCell,
   type PastView,
 } from "../ipc/atcoderProblems";
 import { ratingClass } from "../rating";
+import type { ProblemMarks } from "../ipc/problemMarks";
+import RetryList from "./RetryList";
 
 const CATEGORIES: { id: PastCategory; label: string }[] = [
   { id: "abc", label: "ABC" },
@@ -27,10 +32,33 @@ type Props = {
   // 問題文の欄の問題（そのますを強調する）
   current: ProblemId | null;
   onSelect: (id: ProblemId) => void;
+  // 自力 AC・解説 AC の記録（Phase 33。D-257）。AC のますのうち解説 AC だけ色を変え、説明にはどのますにも出す。
+  // 解き直しの印（Phase 34。D-258）は、ますの右上の三角と説明
+  marks: ProblemMarks;
+  // 解き直しの印を外すとき（「解き直し」の一覧の「外す」）
+  onRetry: (id: string, on: boolean) => Promise<void>;
 };
 
-function PastProblems({ user, loggedIn, current, onSelect }: Props) {
-  const [category, setCategory] = useState<PastCategory>("abc");
+// ますの説明の AC 状況と記録の行（D-257）
+function solvedHint(cell: PastCell, marks: ProblemMarks): string {
+  const solved = marks[cell.problem]?.solved;
+  if (cell.solved === "accepted") {
+    return solved === "editorial" ? "解説 AC" : solved === "self" ? "自力 AC" : "AC（自力・解説の記録なし）";
+  }
+  const status = cell.solved === "tried" ? "提出あり（AC なし）" : "";
+  const mark = solved === "editorial" ? "記録：解説" : solved === "self" ? "記録：自力" : "";
+  return [status, mark].filter(Boolean).join("\n");
+}
+
+// ますの説明の解き直しの行（D-258）
+function retryHint(problem: string, marks: ProblemMarks): string {
+  const since = marks[problem]?.retry;
+  return since ? `解き直す（${since} から）` : "";
+}
+
+function PastProblems({ user, loggedIn, current, onSelect, marks, onRetry }: Props) {
+  // 表の種類、または「解き直し」の一覧
+  const [category, setCategory] = useState<PastCategory | "retry">("abc");
   const [view, setView] = useState<PastView | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -57,29 +85,46 @@ function PastProblems({ user, loggedIn, current, onSelect }: Props) {
     }
   }
 
-  // 開いたとき・種類を替えたとき・ID を変えたとき・ログインの状態が変わったとき
+  // 開いたとき・種類を替えたとき・ID を変えたとき・ログインの状態が変わったとき（「解き直し」は RetryList が読む）
   useEffect(() => {
-    void read(category, false);
+    if (category !== "retry") {
+      void read(category, false);
+    }
   }, [category, user, loggedIn]);
 
+  const tabs = (
+    <div className="past-categories" role="tablist" aria-label="コンテストの種類">
+      {[...CATEGORIES, { id: "retry" as const, label: "解き直し" }].map(({ id, label }) => (
+        <button
+          key={id}
+          type="button"
+          role="tab"
+          aria-selected={category === id}
+          className={`past-category ${category === id ? "selected" : ""}`}
+          onClick={() => setCategory(id)}
+        >
+          {label}
+        </button>
+      ))}
+    </div>
+  );
+  if (category === "retry") {
+    return (
+      <RetryList tabs={tabs} user={user} loggedIn={loggedIn} current={current} onSelect={onSelect} marks={marks} onRetry={onRetry} />
+    );
+  }
+
   const table = view?.table ?? null;
+  // 今の表の解説 AC の数（D-257）
+  const editorialCount = table
+    ? table.rows
+        .flatMap((row) => row.cells)
+        .filter((cell) => cell?.solved === "accepted" && marks[cell.problem]?.solved === "editorial").length
+    : 0;
   return (
     <div className="past-problems">
       <div className="past-head">
-        <div className="past-categories" role="tablist" aria-label="コンテストの種類">
-          {CATEGORIES.map(({ id, label }) => (
-            <button
-              key={id}
-              type="button"
-              role="tab"
-              aria-selected={category === id}
-              className={`past-category ${category === id ? "selected" : ""}`}
-              onClick={() => setCategory(id)}
-            >
-              {label}
-            </button>
-          ))}
-        </div>
+        {tabs}
         <button type="button" className="contest-refresh" disabled={loading} onClick={() => void read(category, true)}>
           更新
         </button>
@@ -87,7 +132,7 @@ function PastProblems({ user, loggedIn, current, onSelect }: Props) {
           {loading
             ? "読んでいます…"
             : table && view?.user
-              ? `${view.user}${user.trim() ? "" : "（ログインしているアカウント）"}：AC ${table.accepted} / ${table.total} 問${view.solvedComplete ? "" : "（提出の続きは、もう一度「更新」で読みます）"}`
+              ? `${view.user}${user.trim() ? "" : "（ログインしているアカウント）"}：AC ${table.accepted} / ${table.total} 問${editorialCount > 0 ? `（解説 ${editorialCount}）` : ""}${view.solvedComplete ? "" : "（提出の続きは、もう一度「更新」で読みます）"}`
               : table
                 ? `${table.total} 問。ログインするか、設定の「過去問」に AtCoder の ID を書くと、AC 状況も出ます`
                 : ""}
@@ -126,14 +171,24 @@ function PastProblems({ user, loggedIn, current, onSelect }: Props) {
                     }
                     const selected = current?.contest === row.contest && current.task === cell.problem;
                     const hint = cell.difficulty ? difficultyHint(cell.difficulty) : "diff はありません";
+                    const solvedLine = [solvedHint(cell, marks), retryHint(cell.problem, marks)]
+                      .filter(Boolean)
+                      .join("\n");
+                    // 解説 AC は、AC の緑の代わりに別の色（D-257）
+                    const background =
+                      cell.solved === "accepted" && marks[cell.problem]?.solved === "editorial"
+                        ? "past-editorial"
+                        : cell.solved
+                          ? `past-${cell.solved}`
+                          : "";
                     return (
                       <td
                         key={table.columns[index]}
-                        className={`past-cell ${cell.solved ? `past-${cell.solved}` : ""} ${selected ? "current" : ""}`}
+                        className={`past-cell ${background} ${selected ? "current" : ""} ${marks[cell.problem]?.retry ? "past-retry" : ""}`}
                       >
                         <button
                           type="button"
-                          title={`${cell.problem}\n${hint}${cell.solved === "accepted" ? "\nAC 済み" : cell.solved === "tried" ? "\n提出あり（AC なし）" : ""}`}
+                          title={`${cell.problem}\n${hint}${solvedLine ? `\n${solvedLine}` : ""}`}
                           onClick={() => onSelect({ contest: row.contest, task: cell.problem })}
                         >
                           {cell.difficulty ? (

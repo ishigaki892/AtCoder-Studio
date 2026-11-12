@@ -24,6 +24,8 @@ import { PROBLEM_BUTTONS, type ProblemSettings } from "../ipc/state";
 import { UNTRUSTED } from "./runState";
 import { copyText } from "./copyText";
 import { markImportant, markSections, trustOnlyHighlight } from "./highlight";
+import { statementSections } from "./sections";
+import { SOLVED_LABELS, type ProblemMarks, type SolvedBy } from "../ipc/problemMarks";
 import { activeEditorTarget } from "../editor/Editor";
 import { replaceDocument, replaceInputMacros } from "../editor/inputMacro";
 import { isCppPath, isPythonPath } from "../editor/language";
@@ -84,11 +86,11 @@ const SAMPLE_HEADING = /^(入力例|出力例)\s*\d+$/;
 // 入力例・出力例の見出しの右に「コピー」ボタンを足す（Phase 11 作業 1。D-177）。
 // 中身は数式を描く前に読んでおく。ボタンは画面側で作る要素で、問題文の HTML（Rust 側の無害化）には足さない
 function addCopyButtons(container: HTMLElement) {
-  for (const section of container.querySelectorAll("section")) {
-    const heading = section.querySelector("h3");
+  // 区画の見分け方は Rust 側と同じ（D-256。古い ABC は見出しが section の外にある）
+  for (const { heading, section } of statementSections(container)) {
     const pre = section.querySelector("pre");
     // 開発のときの React（StrictMode）は描画の後の処理を 2 回呼ぶので、ボタンがあれば足さない
-    if (!heading || !pre || heading.querySelector(".sample-copy")) {
+    if (!pre || heading.querySelector(".sample-copy")) {
       continue;
     }
     if (!SAMPLE_HEADING.test(heading.textContent?.trim() ?? "")) {
@@ -224,6 +226,17 @@ type Props = {
   onPackageCreated: (main: string) => void;
   // 見出しの行に出すボタンと、main() に for まで書くか（Phase 15 作業 3。D-196・D-197）
   settings: ProblemSettings;
+  // 自力 AC・解説 AC の記録（Phase 33。D-257）と、変えるとき（null で記録なし）
+  marks: ProblemMarks;
+  onMark: (id: string, solved: SolvedBy | null) => Promise<void>;
+  // 解き直しの印を付け外しするとき（Phase 34。D-258）
+  onRetry: (id: string, on: boolean) => Promise<void>;
+  // 「白紙から解き直す」「生成器と愚直解を作る」を押せない理由（押せるときは undefined。D-258・D-259）
+  folderBlocked: string | undefined;
+  // 「白紙から解き直す」を押したとき（知らせる文を返す。やめたら null）
+  onRestart: (id: ProblemId) => Promise<string | null>;
+  // 「生成器と愚直解を作る」を押したとき（知らせる文を返す。D-259）
+  onMakeRandom: (id: ProblemId) => Promise<string>;
 };
 
 function ProblemPane({
@@ -234,6 +247,12 @@ function ProblemPane({
   canCreate,
   onPackageCreated,
   settings,
+  marks,
+  onMark,
+  onRetry,
+  folderBlocked,
+  onRestart,
+  onMakeRandom,
 }: Props) {
   const [state, setState] = useState<State>({ kind: "none" });
   // 「サンプルを保存」の結果の知らせ
@@ -247,6 +266,8 @@ function ProblemPane({
   // 「input! を作る」の結果と、置き換え・コピーの知らせ（Phase 15 作業 2。D-195）
   const [made, setMade] = useState<{ generated: GeneratedInput; message: string | null } | null>(null);
   const [making, setMaking] = useState(false);
+  // 「白紙から解き直す」を押してから終わるまで（D-258）
+  const [restarting, setRestarting] = useState(false);
   // 「…」の一覧（再取得・公式ページ・この問題を作る）が開いているか（ユーザーの依頼、2026-10-28）
   const [moreOpen, setMoreOpen] = useState(false);
 
@@ -448,6 +469,42 @@ function ProblemPane({
     setMade({ generated, message });
   }
 
+  // 白紙から解き直す（D-258）。確認・保存・退避・書き直し・タブの読み直しは App と Rust 側が行う
+  async function restart(problemId: ProblemId) {
+    // 押せないときも、何も起きないのではなく理由を出す
+    if (folderBlocked !== undefined) {
+      setNotice(`白紙から解き直せません：${folderBlocked}`);
+      return;
+    }
+    if (restarting) {
+      return;
+    }
+    setRestarting(true);
+    try {
+      const message = await onRestart(problemId);
+      if (message) {
+        setNotice(message);
+      }
+    } catch (e) {
+      setNotice(`白紙から解き直せません：${String(e)}`);
+    } finally {
+      setRestarting(false);
+    }
+  }
+
+  // 生成器と愚直解を作る（D-259）
+  async function makeRandom(problemId: ProblemId) {
+    if (folderBlocked !== undefined) {
+      setNotice(`生成器と愚直解を作れません：${folderBlocked}`);
+      return;
+    }
+    try {
+      setNotice(await onMakeRandom(problemId));
+    } catch (e) {
+      setNotice(`生成器と愚直解を作れません：${String(e)}`);
+    }
+  }
+
   async function copyInput(generated: GeneratedInput) {
     const copied = await copyText(inputText(generated));
     setMade({ generated, message: copied ? "コピーしました" : "コピーできませんでした" });
@@ -463,6 +520,9 @@ function ProblemPane({
     }
     if (name === "createProblem") {
       return creating ? "作っています…" : "この問題を作る";
+    }
+    if (name === "restart") {
+      return restarting ? "解き直しています…" : "白紙から解き直す";
     }
     return PROBLEM_BUTTONS.find((b) => b.name === name)?.label ?? name;
   }
@@ -487,28 +547,43 @@ function ProblemPane({
       case "createProblem":
         void create(problemId);
         break;
+      case "restart":
+        void restart(problemId);
+        break;
+      case "makeRandom":
+        void makeRandom(problemId);
+        break;
     }
   }
 
   // 「サンプルを保存」を押せない理由（D-128）
   const saveBlocked = untrusted ? UNTRUSTED : target ? undefined : "実行の対象のファイルを開いてください";
 
+  // 押せない理由（「サンプルを保存」と「白紙から解き直す」）
+  function blockedReason(name: string): string | undefined {
+    return name === "saveSamples" ? saveBlocked : name === "restart" || name === "makeRandom" ? folderBlocked : undefined;
+  }
+
   // 見出しの行のボタン
   function headButton(name: string, problemId: ProblemId) {
-    const busy = (name === "makeInput" && making) || (name === "createProblem" && creating);
+    const busy =
+      (name === "makeInput" && making) || (name === "createProblem" && creating) || (name === "restart" && restarting);
+    const blocked = blockedReason(name);
     const button = (
       <button
         key={name}
         type="button"
         className="problem-link"
-        aria-disabled={busy || (name === "saveSamples" && !target)}
+        aria-disabled={
+          busy || (name === "saveSamples" && !target) || ((name === "restart" || name === "makeRandom") && blocked !== undefined)
+        }
         onClick={() => runButton(name, problemId)}
       >
         {buttonLabel(name)}
       </button>
     );
-    return name === "saveSamples" ? (
-      <span key={name} className="run-button-wrap" data-tip={saveBlocked}>
+    return name === "saveSamples" || name === "restart" || name === "makeRandom" ? (
+      <span key={name} className="run-button-wrap" data-tip={blocked}>
         {button}
       </span>
     ) : (
@@ -516,9 +591,9 @@ function ProblemPane({
     );
   }
 
-  // 「…」の一覧のボタン
+  // 「…」の一覧のボタン。「白紙から解き直す」「生成器と愚直解を作る」は、押せないときも押して理由を出す（D-258・D-259）
   function menuButton(name: string, problemId: ProblemId) {
-    const blocked = name === "saveSamples" ? saveBlocked : undefined;
+    const blocked = name === "restart" || name === "makeRandom" ? undefined : blockedReason(name);
     return (
       <button
         key={name}
@@ -611,6 +686,47 @@ function ProblemPane({
                   </span>
                 </>
               )}
+              {/* 自力 AC・解説 AC の記録（D-257）。押すとその記録、押されているものをもう一度押すと記録なし */}
+              <span className="problem-marks" role="group" aria-label="どう解いたかの記録">
+                {(["self", "editorial"] as const).map((solved) => {
+                  const pressed = marks[problemId.task]?.solved === solved;
+                  return (
+                    <button
+                      key={solved}
+                      type="button"
+                      className={`problem-mark ${pressed ? `pressed mark-${solved}` : ""}`}
+                      aria-pressed={pressed}
+                      title={pressed ? `「${SOLVED_LABELS[solved]}」の記録を外す` : `${SOLVED_LABELS[solved]}で解いたと記録する（過去問の表に出ます）`}
+                      onClick={() =>
+                        onMark(problemId.task, pressed ? null : solved).catch((e) =>
+                          setNotice(`記録を保存できません：${String(e)}`),
+                        )
+                      }
+                    >
+                      {SOLVED_LABELS[solved]}
+                    </button>
+                  );
+                })}
+                {/* 解き直しの印（D-258）。「自力」「解説」とは別に付け外しする */}
+                {(() => {
+                  const since = marks[problemId.task]?.retry;
+                  return (
+                    <button
+                      type="button"
+                      className={`problem-mark ${since ? "pressed mark-retry" : ""}`}
+                      aria-pressed={since !== undefined}
+                      title={since ? `解き直しの印を外す（${since} から）` : "解き直す問題として印を付ける（「過去問」の「解き直し」に出ます）"}
+                      onClick={() =>
+                        onRetry(problemId.task, since === undefined).catch((e) =>
+                          setNotice(`印を保存できません：${String(e)}`),
+                        )
+                      }
+                    >
+                      解き直す
+                    </button>
+                  );
+                })()}
+              </span>
             </div>
           </div>
           {notice && <div className="problem-notice">{notice}</div>}

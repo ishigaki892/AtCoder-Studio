@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-ask-restart-package"
+description = "Enables the ask_restart_package command without any pre-configured scope."
+commands.allow = ["ask_restart_package"]
+
+[[permission]]
+identifier = "deny-ask-restart-package"
+description = "Denies the ask_restart_package command without any pre-configured scope."
+commands.deny = ["ask_restart_package"]

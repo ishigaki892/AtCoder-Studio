@@ -5,6 +5,7 @@ mod compare;
 mod cpp;
 mod cpp_expand;
 mod debug;
+mod gen_template;
 mod history;
 mod images;
 mod input_cpp;
@@ -16,6 +17,7 @@ mod lsp;
 mod menu;
 mod notify;
 mod problem;
+mod problem_marks;
 mod process;
 mod py_bundle;
 mod python;
@@ -183,6 +185,13 @@ pub fn run() {
             commands::load_problem_images,
             commands::problem_difficulties,
             commands::past_problems,
+            commands::problem_marks,
+            commands::set_problem_mark,
+            commands::set_problem_retry,
+            commands::retry_problems,
+            commands::create_random_programs,
+            commands::ask_restart_package,
+            commands::restart_package,
             commands::load_task_list,
             commands::open_problem_page,
             commands::open_editorial_page,

@@ -1269,6 +1269,188 @@ pub async fn past_problems(
     .map_err(|_| "過去問の表を読めません".to_string())?
 }
 
+// 自力 AC・解説 AC の記録（Phase 33。D-257）を読めなかったときは、退避先を知らせる（記録は空から始める）
+fn notify_broken_marks(app: &AppHandle, backup: Option<PathBuf>) {
+    if let Some(backup) = backup {
+        app.dialog()
+            .message(format!(
+                "自力・解説の記録を読めなかったので、別の名前で退避し、記録なしで始めます。\n退避先：\n{}",
+                backup.to_string_lossy()
+            ))
+            .title("自力・解説の記録")
+            .kind(MessageDialogKind::Warning)
+            .blocking_show();
+    }
+}
+
+// 自力 AC・解説 AC の記録をすべて返す（D-257）。キーは問題 ID
+#[tauri::command]
+pub async fn problem_marks(app: AppHandle) -> Result<crate::problem_marks::Marks, String> {
+    ensure_primary(&app)?;
+    let dir = app_dir(&app)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let (marks, backup) = crate::problem_marks::load(&dir)?;
+        notify_broken_marks(&app, backup);
+        Ok(marks)
+    })
+    .await
+    .map_err(|_| "自力・解説の記録を読めません".to_string())?
+}
+
+// 1 問の「自力」「解説」を変える（solved が null なら記録なし。D-257）。変えたあとのすべての記録を返す
+#[tauri::command]
+pub async fn set_problem_mark(
+    id: String,
+    solved: Option<crate::problem_marks::SolvedBy>,
+    app: AppHandle,
+) -> Result<crate::problem_marks::Marks, String> {
+    ensure_primary(&app)?;
+    let dir = app_dir(&app)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let (marks, backup) = crate::problem_marks::set_solved(&dir, &id, solved)?;
+        notify_broken_marks(&app, backup);
+        Ok(marks)
+    })
+    .await
+    .map_err(|_| "自力・解説の記録を保存できません".to_string())?
+}
+
+// 1 問の解き直しの印を変える（on なら今日の日付で付ける。すでに付いていれば日付は変えない。D-258）。
+// 変えたあとのすべての記録を返す
+#[tauri::command]
+pub async fn set_problem_retry(
+    id: String,
+    on: bool,
+    app: AppHandle,
+) -> Result<crate::problem_marks::Marks, String> {
+    ensure_primary(&app)?;
+    let dir = app_dir(&app)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let since = on.then(crate::problem_marks::today);
+        let (marks, backup) = crate::problem_marks::set_retry(&dir, &id, since)?;
+        notify_broken_marks(&app, backup);
+        Ok(marks)
+    })
+    .await
+    .map_err(|_| "解き直しの印を保存できません".to_string())?
+}
+
+// 「過去問」の「解き直し」の一覧（D-258）。AtCoder Problems のデータと AC 状況は保存してあるものだけを使う
+// （新しく読まない）。AC 状況の ID は、設定の ID か、分かっていればログインしているアカウントの ID（ここでは調べない）
+#[tauri::command]
+pub async fn retry_problems(app: AppHandle) -> Result<crate::atcoder_problems::RetryView, String> {
+    ensure_primary(&app)?;
+    let dir = app_dir(&app)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let (marks, backup) = crate::problem_marks::load(&dir)?;
+        notify_broken_marks(&app, backup);
+        let user = storage::atcoder_problems_settings(&dir).user;
+        let user = if user.is_empty() {
+            app.state::<SessionState>().user()
+        } else {
+            Some(user)
+        };
+        Ok(crate::atcoder_problems::retry_view(
+            &dir,
+            &marks,
+            user.as_deref(),
+        ))
+    })
+    .await
+    .map_err(|_| "解き直しの一覧を読めません".to_string())?
+}
+
+// 生成器と愚直解を作る（Phase 35 作業 2。D-259）。target のパッケージの examples/ に、gen と naive を、なければ書く
+// （すでにあれば変えない）。問題文は保存してあるものだけを使う。パッケージは、白紙から解き直すときと同じく、
+// main が決まった形のものだけ（Rust の src/bin/ にファイルがあれば、example の名前が決まらないので扱わない）
+#[tauri::command]
+pub async fn create_random_programs(
+    target: Target,
+    contest: String,
+    task: String,
+    app: AppHandle,
+    workspace: State<'_, Workspace>,
+) -> Result<scaffold::RandomPrograms, String> {
+    let id = ProblemId::new(&contest, &task)?;
+    let root = workspace.root()?;
+    let dir = app_dir(&app)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let package = package_dir(&root, &target)?;
+        scaffold::restart_main(&package, target.language)?;
+        let template = template_for_language(&dir, target.language)?;
+        let problem = problem::load_saved(&dir, &id)?;
+        scaffold::write_random_programs(&root, &package, &problem, &template)
+    })
+    .await
+    .map_err(|_| "生成器と愚直解を作れません".to_string())?
+}
+
+// 白紙から解き直す前の確認（Phase 34 作業 3。D-258）。target のパッケージの main が決まった形か確かめてから、
+// 確認のダイアログを出す。「解き直す」なら true。画面は、true のときだけ保存していない変更を保存し、restart_package を呼ぶ
+#[tauri::command]
+pub async fn ask_restart_package(
+    target: Target,
+    app: AppHandle,
+    workspace: State<'_, Workspace>,
+) -> Result<bool, String> {
+    let root = workspace.root()?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let package = package_dir(&root, &target)?;
+        let main = scaffold::restart_main(&package, target.language)?;
+        let main_name = main
+            .strip_prefix(&package)
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        Ok(app
+            .dialog()
+            .message(format!(
+                "「{}」の {main_name} を old/main-<日時>.{} に移し、{main_name} を雛形で書き直します。\nテストケース（test/）とほかのファイルは変えません。",
+                target.package,
+                target.language.extension()
+            ))
+            .title("白紙から解き直す")
+            .kind(MessageDialogKind::Info)
+            .buttons(MessageDialogButtons::OkCancelCustom(
+                "解き直す".to_string(),
+                "やめる".to_string(),
+            ))
+            .blocking_show())
+    })
+    .await
+    .map_err(|_| "白紙から解き直せません".to_string())?
+}
+
+// 白紙から解き直す（D-258）。target のパッケージの main を old/ に日時を付けて移し、問題のフォルダを作るときと同じ中身
+// （雛形と、設定なら入力のコード）で書き直す。確認は ask_restart_package で済ませておく。問題文は保存してあるものだけを使う
+// （取得しない）。ファイルを動かして書くだけで、コードは動かさないので、信頼は問わない（問題のフォルダを作るときと同じ）
+#[tauri::command]
+pub async fn restart_package(
+    target: Target,
+    contest: String,
+    task: String,
+    app: AppHandle,
+    workspace: State<'_, Workspace>,
+) -> Result<scaffold::Restarted, String> {
+    let id = ProblemId::new(&contest, &task)?;
+    let root = workspace.root()?;
+    let dir = app_dir(&app)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let package = package_dir(&root, &target)?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let (y, mo, d, h, mi, s) = crate::problem_marks::local_time(now)
+            .ok_or_else(|| "今の日時が分かりません".to_string())?;
+        let stamp = format!("{y:04}{mo:02}{d:02}-{h:02}{mi:02}{s:02}");
+        let template = template_for_language(&dir, target.language)?;
+        let problem = problem::load_saved(&dir, &id).ok();
+        scaffold::restart_package(&root, &package, &template, problem.as_ref(), &stamp)
+    })
+    .await
+    .map_err(|_| "白紙から解き直せません".to_string())?
+}
+
 // コンテストの問題の一覧（選択欄。D-117）。保存してあればそれを使う（D-111）
 #[tauri::command]
 pub async fn load_task_list(
@@ -1687,8 +1869,12 @@ pub async fn create_problem_package(
 // 言語は settings.json の problem.language（D-208。コンテストごとには選ばない。ユーザーの指摘、2026-10-28）。
 // C++ は compile_flags.txt の中身（AC Library があればその場所）も入れる
 fn template_for(dir: &Path) -> Result<scaffold::Template, String> {
+    template_for_language(dir, storage::problem_settings(dir).language)
+}
+
+// 言語を決めたテンプレート（白紙から解き直すときは、パッケージの言語。D-258）
+fn template_for_language(dir: &Path, language: Language) -> Result<scaffold::Template, String> {
     let settings = storage::problem_settings(dir);
-    let language = settings.language;
     let mut template = scaffold::load_template(dir, language)?;
     // 入力のコードを入れておく設定（D-198。C++ は Phase 17 作業 8。D-213）
     template.fill = settings.fill_input.then_some(scaffold::FillInput {
