@@ -61,6 +61,7 @@ fn main() {
             "set_problem_mark",
             "set_problem_retry",
             "retry_problems",
+            "editorial_problems",
             "create_random_programs",
             "ask_restart_package",
             "restart_package",

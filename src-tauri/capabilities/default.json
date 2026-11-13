@@ -64,6 +64,7 @@
     "allow-set-problem-mark",
     "allow-set-problem-retry",
     "allow-retry-problems",
+    "allow-editorial-problems",
     "allow-create-random-programs",
     "allow-ask-restart-package",
     "allow-restart-package",

@@ -3055,6 +3055,26 @@ body.hide-breadcrumbs .breadcrumbs {
   padding: 2px 8px;
 }
 
+/* 「解説 AC」の並べ方を選ぶ見出し（Phase 37。D-261） */
+.retry-sort {
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-weight: inherit;
+  cursor: pointer;
+}
+
+.retry-sort:hover {
+  color: var(--fg-strong);
+  text-decoration: underline;
+}
+
+.retry-sort.selected {
+  color: var(--fg-strong);
+}
+
 .retry-table .retry-problem {
   padding: 0;
   text-align: left;

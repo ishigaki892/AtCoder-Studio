@@ -704,11 +704,15 @@ pub struct ContestCreated {
 
 // コンテストの問題をすべて作る。list は問題の一覧、load は問題を返す。1 問ずつ順に取り、cancel が立ったら止める。
 // 取れなかった・書けなかった問題は、理由を付けて飛ばす（自動では読み直さない）
+// 取得の仕方（一覧・まとめて読む・1 問ずつ）を引数で受け取り、テストで差し替える（D-262 で 8 つになった）
+#[allow(clippy::too_many_arguments)]
 pub fn create_contest(
     root: &Path,
     contest: &str,
     template: &Template,
     list: &dyn Fn(&str) -> Result<Vec<TaskEntry>, String>,
+    // 問題を 1 問ずつ読む前に、まとめて読んで保存しておく（印刷用のページ。D-262）。読めなくてもかまわない
+    prefetch: &dyn Fn(&[TaskEntry]),
     load: &dyn Fn(&ProblemId) -> Result<Problem, String>,
     cancel: &AtomicBool,
     on_event: &dyn Fn(ScaffoldEvent),
@@ -719,6 +723,9 @@ pub fn create_contest(
         .map_err(|error| format!("{error}（開始前のコンテストは、問題の一覧を読めません）"))?;
     on_event(ScaffoldEvent::Listed { total: tasks.len() });
     let (contest_dir, config_created) = prepare_contest_dir(root, contest, template.language)?;
+    if !cancel.load(Ordering::SeqCst) {
+        prefetch(&tasks);
+    }
     let mut packages = Vec::new();
     let mut stopped = false;
     for (index, entry) in tasks.iter().enumerate() {
@@ -1462,11 +1469,13 @@ mod tests {
             }
         };
         let events = Mutex::new(Vec::new());
+        let prefetched = Mutex::new(Vec::new());
         let created = create_contest(
             &root.0,
             "abc480",
             &default_template(),
             &list,
+            &|tasks: &[TaskEntry]| prefetched.lock().unwrap().push(tasks.len()),
             &load,
             &AtomicBool::new(false),
             &|event| events.lock().unwrap().push(event),
@@ -1474,6 +1483,8 @@ mod tests {
         .unwrap();
         assert_eq!(created.total, 3);
         assert!(!created.stopped);
+        // 1 問ずつ読む前に、一覧の全問題を渡して 1 回だけまとめて読む（D-262）
+        assert_eq!(*prefetched.lock().unwrap(), [3]);
         let errors: Vec<_> = created.packages.iter().map(|p| p.error.is_some()).collect();
         assert_eq!(errors, vec![false, true, false]);
         assert!(
@@ -1520,6 +1531,7 @@ mod tests {
             "abc480",
             &default_template(),
             &list,
+            &|_: &[TaskEntry]| {},
             &load,
             &cancel,
             &|_| {},
@@ -1536,6 +1548,7 @@ mod tests {
             "abc999",
             &default_template(),
             &missing,
+            &|_: &[TaskEntry]| {},
             &load,
             &AtomicBool::new(false),
             &|_| {},
@@ -1551,6 +1564,7 @@ mod tests {
                 "../x",
                 &default_template(),
                 &never,
+                &|_: &[TaskEntry]| {},
                 &load,
                 &AtomicBool::new(false),
                 &|_| {}
@@ -1605,6 +1619,7 @@ mod tests {
             "abc999",
             &template,
             &list,
+            &|_: &[TaskEntry]| {},
             &load,
             &AtomicBool::new(false),
             &|_| {},

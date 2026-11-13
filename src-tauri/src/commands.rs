@@ -1307,7 +1307,8 @@ pub async fn set_problem_mark(
     ensure_primary(&app)?;
     let dir = app_dir(&app)?;
     tauri::async_runtime::spawn_blocking(move || {
-        let (marks, backup) = crate::problem_marks::set_solved(&dir, &id, solved)?;
+        let today = crate::problem_marks::today();
+        let (marks, backup) = crate::problem_marks::set_solved(&dir, &id, solved, &today)?;
         notify_broken_marks(&app, backup);
         Ok(marks)
     })
@@ -1358,6 +1359,34 @@ pub async fn retry_problems(app: AppHandle) -> Result<crate::atcoder_problems::R
     })
     .await
     .map_err(|_| "解き直しの一覧を読めません".to_string())?
+}
+
+// 「過去問」の「解説 AC」の一覧（Phase 37。D-261）。「解説」を付けた問題を、保存してある AtCoder Problems のデータと
+// AC 状況と合わせて返す（新しく読まない）。並べ方の切り替えは画面側
+#[tauri::command]
+pub async fn editorial_problems(
+    app: AppHandle,
+) -> Result<crate::atcoder_problems::RetryView, String> {
+    ensure_primary(&app)?;
+    let dir = app_dir(&app)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let (marks, backup) = crate::problem_marks::load(&dir)?;
+        notify_broken_marks(&app, backup);
+        let user = storage::atcoder_problems_settings(&dir).user;
+        let user = if user.is_empty() {
+            app.state::<SessionState>().user()
+        } else {
+            Some(user)
+        };
+        Ok(crate::atcoder_problems::marks_view(
+            &dir,
+            &marks,
+            user.as_deref(),
+            crate::atcoder_problems::MarkList::Editorial,
+        ))
+    })
+    .await
+    .map_err(|_| "解説 AC の一覧を読めません".to_string())?
 }
 
 // 生成器と愚直解を作る（Phase 35 作業 2。D-259）。target のパッケージの examples/ に、gen と naive を、なければ書く
@@ -1910,6 +1939,9 @@ pub async fn create_contest_packages(
             &contest,
             &template,
             &|contest| problem::load_task_list(&dir, contest, false),
+            &|tasks| {
+                problem::prefetch_contest(&dir, &contest, tasks);
+            },
             &|id| problem::load_problem(&dir, id, false),
             &cancel,
             &|event| {

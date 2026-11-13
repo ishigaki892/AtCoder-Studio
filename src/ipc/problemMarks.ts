@@ -4,8 +4,8 @@ import { invoke } from "@tauri-apps/api/core";
 import type { DifficultyView, Solved } from "./atcoderProblems";
 
 export type SolvedBy = "self" | "editorial";
-// retry は解き直しの印を付けた日（例 "2026-11-12"）
-export type ProblemMark = { solved?: SolvedBy; retry?: string };
+// retry は解き直しの印を付けた日（例 "2026-11-12"）。solvedOn は「自力」「解説」を付けた日（Phase 37。D-261。前の版の記録にはない）
+export type ProblemMark = { solved?: SolvedBy; solvedOn?: string; retry?: string };
 // キーは問題 ID（例：abc001_1）。記録のない問題は入らない
 export type ProblemMarks = Record<string, ProblemMark>;
 
@@ -36,10 +36,18 @@ export type RetryRow = {
   difficulty: DifficultyView | null;
   solved: Solved | null;
   solvedBy: SolvedBy | null;
-  since: string;
+  // 一覧に入れた日（「解き直し」は印を付けた日、「解説 AC」は「解説」を付けた日。前の版の記録は null）
+  since: string | null;
+  // 解き直しの印を付けた日（なければ null）
+  retry: string | null;
 };
 export type RetryView = { rows: RetryRow[]; user: string | null; messages: string[] };
 
 export function retryProblems(): Promise<RetryView> {
   return invoke<RetryView>("retry_problems");
+}
+
+// 「過去問」の「解説 AC」の一覧（D-261）。「解説」を付けた問題すべて（AC 状況は問わない）。並びは付けた日の新しい順
+export function editorialProblems(): Promise<RetryView> {
+  return invoke<RetryView>("editorial_problems");
 }

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-editorial-problems"
+description = "Enables the editorial_problems command without any pre-configured scope."
+commands.allow = ["editorial_problems"]
+
+[[permission]]
+identifier = "deny-editorial-problems"
+description = "Denies the editorial_problems command without any pre-configured scope."
+commands.deny = ["editorial_problems"]

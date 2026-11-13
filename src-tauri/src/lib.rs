@@ -189,6 +189,7 @@ pub fn run() {
             commands::set_problem_mark,
             commands::set_problem_retry,
             commands::retry_problems,
+            commands::editorial_problems,
             commands::create_random_programs,
             commands::ask_restart_package,
             commands::restart_package,

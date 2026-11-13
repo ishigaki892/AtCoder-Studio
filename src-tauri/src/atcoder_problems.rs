@@ -753,8 +753,10 @@ pub struct RetryRow {
     pub difficulty: Option<DifficultyView>,
     pub solved: Option<Solved>,
     pub solved_by: Option<crate::problem_marks::SolvedBy>,
-    // 印を付けた日
-    pub since: String,
+    // 一覧に入れた日。「解き直し」は印を付けた日、「解説 AC」（D-261）は「解説」を付けた日（前の版の記録にはないので None）
+    pub since: Option<String>,
+    // 解き直しの印を付けた日（印がなければ None）
+    pub retry: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -778,10 +780,31 @@ fn saved_resource<T>(
 
 // 解き直しの印を付けた問題の一覧（付けた日の新しい順、同じ日は問題 ID の順）。AtCoder Problems のデータは
 // 保存してあるものだけを使い、新しく読まない。AC 状況も保存してあるもの（過去問の表が読んだもの）
+// 一覧の種類
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MarkList {
+    // 解き直しの印を付けた問題（D-258）
+    Retry,
+    // 「解説」を付けた問題（AC 状況は問わない。D-261）
+    Editorial,
+}
+
+// 解き直しの一覧（D-258）
 pub fn retry_view(
     app_dir: &Path,
     marks: &crate::problem_marks::Marks,
     user: Option<&str>,
+) -> RetryView {
+    marks_view(app_dir, marks, user, MarkList::Retry)
+}
+
+// 印・記録の一覧を作る。並べ方は入れた日の新しい順（日付のないものは後ろ）、同じなら問題 ID の順。
+// 「解説 AC」の並べ方の切り替えは画面側で行う（D-261）
+pub fn marks_view(
+    app_dir: &Path,
+    marks: &crate::problem_marks::Marks,
+    user: Option<&str>,
+    list: MarkList,
 ) -> RetryView {
     let mut messages = Vec::new();
     let problems = saved_resource(app_dir, "contest-problem.json", parse_contest_problems);
@@ -800,7 +823,15 @@ pub fn retry_view(
     let mut rows: Vec<RetryRow> = marks
         .iter()
         .filter_map(|(problem, mark)| {
-            let since = mark.retry.clone()?;
+            let since = match list {
+                MarkList::Retry => Some(mark.retry.clone()?),
+                MarkList::Editorial => {
+                    if mark.solved != Some(crate::problem_marks::SolvedBy::Editorial) {
+                        return None;
+                    }
+                    mark.solved_on.clone()
+                }
+            };
             let mut places: Vec<Place> = problems
                 .iter()
                 .flatten()
@@ -829,9 +860,11 @@ pub fn retry_view(
                 solved: solved.get(problem).copied(),
                 solved_by: mark.solved,
                 since,
+                retry: mark.retry.clone(),
             })
         })
         .collect();
+    // Option の比べ方では None がいちばん小さいので、降順にすると日付のないものが後ろになる
     rows.sort_by(|a, b| {
         b.since
             .cmp(&a.since)
@@ -1404,6 +1437,7 @@ mod tests {
         let dir = TempDir::new("retry");
         let mark = |solved: Option<SolvedBy>, retry: Option<&str>| Mark {
             solved,
+            solved_on: None,
             retry: retry.map(str::to_string),
         };
         let marks: Marks = [
@@ -1473,8 +1507,80 @@ mod tests {
         assert_eq!(shared.difficulty.map(|d| d.value), Some(900));
         assert_eq!(shared.solved, Some(Solved::Accepted));
         assert_eq!(shared.solved_by, Some(SolvedBy::Editorial));
-        assert_eq!(shared.since, "2026-11-10");
+        assert_eq!(shared.since.as_deref(), Some("2026-11-10"));
+        assert_eq!(shared.retry.as_deref(), Some("2026-11-10"));
         assert_eq!(view.rows[0].solved, Some(Solved::Tried));
         assert_eq!(view.rows[1].solved, None);
+    }
+
+    #[test]
+    fn lists_editorial_marks_with_their_dates() {
+        use crate::problem_marks::{Mark, Marks, SolvedBy};
+        let dir = TempDir::new("editorial");
+        let mark = |solved: Option<SolvedBy>, on: Option<&str>, retry: Option<&str>| Mark {
+            solved,
+            solved_on: on.map(str::to_string),
+            retry: retry.map(str::to_string),
+        };
+        let marks: Marks = [
+            // 前の版で付けた（日付のない）記録
+            (
+                "abc001_1".to_string(),
+                mark(Some(SolvedBy::Editorial), None, None),
+            ),
+            (
+                "abc002_1".to_string(),
+                mark(
+                    Some(SolvedBy::Editorial),
+                    Some("2026-11-12"),
+                    Some("2026-11-13"),
+                ),
+            ),
+            (
+                "abc003_1".to_string(),
+                mark(Some(SolvedBy::Editorial), Some("2026-11-13"), None),
+            ),
+            // 「自力」と、解き直しの印だけのものは出さない
+            (
+                "abc004_1".to_string(),
+                mark(Some(SolvedBy::Myself), Some("2026-11-13"), None),
+            ),
+            ("abc005_1".to_string(), mark(None, None, Some("2026-11-13"))),
+        ]
+        .into_iter()
+        .collect();
+        let data = dir.0.join(DIR);
+        std::fs::create_dir_all(&data).unwrap();
+        // AC していない問題も出す（AC 状況は問わない）
+        std::fs::write(
+            data.join("submissions-me.json"),
+            r#"{"user":"me","fromSecond":0,"complete":true,"problems":{"abc002_1":"accepted","abc003_1":"tried"}}"#,
+        )
+        .unwrap();
+        let view = marks_view(&dir.0, &marks, Some("me"), MarkList::Editorial);
+        // 付けた日の新しい順。日付のないものは後ろ
+        let rows: Vec<(&str, Option<&str>)> = view
+            .rows
+            .iter()
+            .map(|row| (row.problem.as_str(), row.since.as_deref()))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ("abc003_1", Some("2026-11-13")),
+                ("abc002_1", Some("2026-11-12")),
+                ("abc001_1", None),
+            ]
+        );
+        assert_eq!(view.rows[0].solved, Some(Solved::Tried));
+        assert_eq!(view.rows[1].solved, Some(Solved::Accepted));
+        assert_eq!(view.rows[2].solved, None);
+        // 解き直しの印も持つ
+        assert_eq!(view.rows[1].retry.as_deref(), Some("2026-11-13"));
+        assert_eq!(view.rows[0].retry, None);
+        // 解き直しの一覧には、印のあるものだけ
+        let view = retry_view(&dir.0, &marks, Some("me"));
+        let ids: Vec<&str> = view.rows.iter().map(|row| row.problem.as_str()).collect();
+        assert_eq!(ids, ["abc002_1", "abc005_1"]);
     }
 }

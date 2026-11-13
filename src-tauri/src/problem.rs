@@ -215,7 +215,11 @@ pub(crate) fn sections<'a>(root: &Selection<'a>) -> Vec<(String, Selection<'a>)>
 // 問題ページの HTML から問題を読み取る（ページの作りは 01 §2）
 pub fn parse_problem(html: &str) -> Result<Problem, String> {
     let document = Document::from(html);
+    parse_in(&document.select("html"))
+}
 
+// root の中から問題を読み取る。問題ページ全体（parse_problem）と、印刷用のページの問題ごとの区画（parse_print_page。D-262）で使う
+fn parse_in(document: &Selection) -> Result<Problem, String> {
     // 問題名：span.h2 の、リンク（「解説」）を除いた文字
     let heading = document.select("span.h2");
     if !heading.exists() {
@@ -403,6 +407,75 @@ pub fn load_problem(app_dir: &Path, id: &ProblemId, refresh: bool) -> Result<Pro
         serde_json::to_vec_pretty(&problem).map_err(|_| "問題を保存できません".to_string())?;
     storage::write_atomic(&path, &json)?;
     Ok(problem)
+}
+
+// 印刷用のページ（`/contests/<ID>/tasks_print`。D-262）から、問題の一覧（tasks）にある問題を取り出す。
+// ページには問題 ID がないので、問題ごとの区画（span.h2 の親）の見出しの頭「<記号> - 」を、一覧の記号と突き合わせる。
+// 同じ記号が一覧かページに 2 つ以上ある問題と、読めない区画は使わない（1 問ずつ問題ページを読む）
+pub fn parse_print_page(html: &str, tasks: &[TaskEntry]) -> Vec<(String, Problem)> {
+    let document = Document::from(html);
+    let headings: Vec<Selection> = document.select("span.h2").iter().collect();
+    let label_of = |heading: &Selection| {
+        squash(heading.text().as_ref())
+            .split_once(" - ")
+            .map(|(label, _)| label.to_string())
+    };
+    let labels: Vec<Option<String>> = headings.iter().map(label_of).collect();
+    let count = |label: &str| {
+        labels
+            .iter()
+            .filter(|l| l.as_deref() == Some(label))
+            .count()
+    };
+    headings
+        .iter()
+        .zip(&labels)
+        .filter_map(|(heading, label)| {
+            let label = label.as_deref()?;
+            let mut matched = tasks.iter().filter(|entry| entry.label == label);
+            let entry = matched.next()?;
+            if matched.next().is_some() || count(label) != 1 {
+                return None;
+            }
+            let problem = parse_in(&heading.parent()).ok()?;
+            Some((entry.task.clone(), problem))
+        })
+        .collect()
+}
+
+// 「コンテストを作る」の前に、保存していない問題が 2 問以上あれば、印刷用のページを 1 回読み、取り出せた問題を保存する（D-262）。
+// 保存した問題の数を返す。読めなかったとき・取り出せなかった問題は何もしない（あとで load_problem が 1 問ずつ読む）
+pub fn prefetch_contest(app_dir: &Path, contest: &str, tasks: &[TaskEntry]) -> usize {
+    let unsaved: Vec<ProblemId> = tasks
+        .iter()
+        .filter_map(|entry| ProblemId::new(contest, &entry.task).ok())
+        .filter(|id| {
+            std::fs::read_to_string(cache_path(app_dir, id))
+                .ok()
+                .and_then(|text| serde_json::from_str::<Problem>(&text).ok())
+                .is_none()
+        })
+        .collect();
+    if unsaved.len() < 2 || ProblemId::new(contest, "x").is_err() {
+        return 0;
+    }
+    let url = format!("https://atcoder.jp/contests/{contest}/tasks_print?lang=ja");
+    let Ok(html) = fetch(&url) else {
+        return 0;
+    };
+    save_printed(app_dir, &unsaved, parse_print_page(&html, tasks))
+}
+
+// 取り出した問題のうち、保存していなかったものを保存する。保存した数を返す
+fn save_printed(app_dir: &Path, unsaved: &[ProblemId], problems: Vec<(String, Problem)>) -> usize {
+    problems
+        .into_iter()
+        .filter_map(|(task, problem)| {
+            let id = unsaved.iter().find(|id| id.task == task)?;
+            let json = serde_json::to_vec_pretty(&problem).ok()?;
+            storage::write_atomic(&cache_path(app_dir, id), &json).ok()
+        })
+        .count()
 }
 
 // 保存してある問題だけを返す（取得しない。Phase 15 の input! を作るときに使う。D-194）
@@ -1303,5 +1376,157 @@ c
                 exponent: 6
             })
         );
+    }
+
+    // 印刷用のページ（tasks_print）の作りをまねた例（D-262。2026-11-13 に abc430・abc001・joisc2007 のページで観察した形）。
+    // 問題ごとに div.col-sm-12 があり、その中が問題ページと同じ作り。区画の間に空の div.next-page がある
+    const PRINT_PAGE: &str = r#"<html><body><div id="main-container" class="container">
+<script>var PRINT = true;</script>
+<div class="row">
+<div class="col-sm-12">
+<span class="h2">A - Happy Birthday!</span>
+<hr />
+<p>実行時間制限: 2 sec / メモリ制限: 1024 MiB</p>
+<div id="task-statement"><span class="lang"><span class="lang-ja">
+<div class="part"><section><h3>問題文</h3><p><var>A</var> 個と <var>B</var> 個</p></section></div>
+<div class="part"><section><h3>入力例 1</h3><pre>5 4
+</pre></section></div>
+<div class="part"><section><h3>出力例 1</h3><pre>Yay!
+</pre></section></div>
+</span><span class="lang-en"><p>Score</p></span></span></div>
+</div>
+<div class="next-page col-sm-12"></div>
+<div class="col-sm-12">
+<span class="h2">B - 視程の通報</span>
+<hr />
+<p>実行時間制限: 3 sec / メモリ制限: 256 MiB</p>
+<div id="task-statement">
+<div class="part"><section><h3>問題文</h3><p>古い ABC の形（lang-ja がない）</p></section></div>
+<div class="part"><section><h3>入力例 1</h3><pre>15000</pre></section></div>
+<div class="part"><section><h3>出力例 1</h3><pre>65</pre></section></div>
+</div>
+</div>
+<div class="next-page col-sm-12"></div>
+<div class="col-sm-12">
+<span class="h2">packing10 - 箱詰め (Packing)</span>
+<hr />
+<p>実行時間制限: 1 sec / メモリ制限: 256 MiB</p>
+<div id="task-statement"><span class="lang"><span class="lang-ja">
+<div class="part"><section><h3>問題文</h3><p>記号が英単語の問題</p></section></div>
+</span></span></div>
+</div>
+<div class="next-page col-sm-12"></div>
+<div class="col-sm-12">
+<span class="h2">C - 一覧にない問題</span>
+<hr />
+<p>実行時間制限: 2 sec / メモリ制限: 1024 MiB</p>
+<div id="task-statement"><span class="lang"><span class="lang-ja"><p>x</p></span></span></div>
+</div>
+<div class="next-page col-sm-12"></div>
+<div class="col-sm-12">
+<span class="h2">D - 制限の行がない</span>
+<hr />
+<div id="task-statement"><span class="lang"><span class="lang-ja"><p>x</p></span></span></div>
+</div>
+<div class="next-page col-sm-12"></div>
+<div class="col-sm-12"><span class="h2">E - 同じ記号 1</span><hr /><p>実行時間制限: 2 sec / メモリ制限: 1024 MiB</p><div id="task-statement"><p>x</p></div></div>
+<div class="col-sm-12"><span class="h2">E - 同じ記号 2</span><hr /><p>実行時間制限: 2 sec / メモリ制限: 1024 MiB</p><div id="task-statement"><p>y</p></div></div>
+</div></div></body></html>"#;
+
+    fn entry(task: &str, label: &str) -> TaskEntry {
+        TaskEntry {
+            task: task.to_string(),
+            label: label.to_string(),
+            title: String::new(),
+        }
+    }
+
+    #[test]
+    fn reads_problems_from_the_print_page() {
+        let tasks = [
+            entry("abc100_a", "A"),
+            entry("abc001_2", "B"),
+            entry("joisc2007_packin10", "packing10"),
+            entry("abc100_d", "D"),
+            entry("abc100_e", "E"),
+            entry("abc100_f", "F"),
+        ];
+        let problems = parse_print_page(PRINT_PAGE, &tasks);
+        // 一覧にない C・読めない D・ページに同じ記号が 2 つある E・ページにない F は使わない
+        let ids: Vec<&str> = problems.iter().map(|(task, _)| task.as_str()).collect();
+        assert_eq!(ids, ["abc100_a", "abc001_2", "joisc2007_packin10"]);
+        // 問題ページから読んだときと同じ中身（問題名・制限・問題文・サンプル）
+        let (_, a) = &problems[0];
+        let page = parse_problem(&format!(
+            "<html><body>{}</body></html>",
+            Document::from(PRINT_PAGE)
+                .select("div.col-sm-12")
+                .first()
+                .html()
+        ))
+        .unwrap();
+        assert_eq!(a, &page);
+        assert_eq!(a.title, "A - Happy Birthday!");
+        assert_eq!(
+            (a.time_limit.as_str(), a.memory_limit.as_str()),
+            ("2 sec", "1024 MiB")
+        );
+        assert!(a.statement_html.contains("問題文") && !a.statement_html.contains("Score"));
+        assert_eq!(a.samples.len(), 1);
+        assert_eq!(a.samples[0].output, "Yay!\n");
+        // 古い ABC の形・英単語の記号も読める。区画ごとに読むので、ほかの問題の中身は入らない
+        let (_, b) = &problems[1];
+        assert_eq!(
+            (b.time_limit.as_str(), b.memory_limit.as_str()),
+            ("3 sec", "256 MiB")
+        );
+        assert!(b.statement_html.contains("古い ABC") && !b.statement_html.contains("Happy"));
+        assert_eq!(b.samples[0].input, "15000\n");
+        assert_eq!(problems[2].1.title, "packing10 - 箱詰め (Packing)");
+        assert!(problems[2].1.samples.is_empty());
+        // 一覧に同じ記号が 2 つあれば使わない
+        let doubled = [entry("abc100_a", "A"), entry("abc100_a2", "A")];
+        assert!(parse_print_page(PRINT_PAGE, &doubled).is_empty());
+        // 問題の区画がないページ
+        assert!(parse_print_page("<html><body><p>x</p></body></html>", &tasks).is_empty());
+    }
+
+    #[test]
+    fn saves_only_unsaved_problems_from_the_print_page() {
+        let dir = std::env::temp_dir().join(format!("atcoder-studio-print-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let saved = ProblemId::new("abc100", "abc100_a").unwrap();
+        let unsaved = ProblemId::new("abc100", "abc100_b").unwrap();
+        let old = parse_problem(PAGE).unwrap();
+        storage::write_atomic(
+            &cache_path(&dir, &saved),
+            &serde_json::to_vec(&old).unwrap(),
+        )
+        .unwrap();
+        // 保存していない問題が 1 問だけなら、印刷用のページは読まない（テストでは AtCoder につながない）
+        let tasks = [entry("abc100_a", "A"), entry("abc100_b", "B")];
+        assert_eq!(prefetch_contest(&dir, "abc100", &tasks), 0);
+        assert!(!cache_path(&dir, &unsaved).exists());
+        // 形の正しくないコンテスト ID でも読まない
+        assert_eq!(
+            prefetch_contest(&dir, "../x", &[entry("a", "A"), entry("b", "B")]),
+            0
+        );
+        // 取り出したもののうち、保存していなかったものだけを書く（保存してあったものは変えない）
+        let printed = parse_print_page(
+            PRINT_PAGE,
+            &[entry("abc100_a", "A"), entry("abc100_b", "B")],
+        );
+        assert_eq!(printed.len(), 2);
+        assert_eq!(
+            save_printed(&dir, std::slice::from_ref(&unsaved), printed),
+            1
+        );
+        assert_eq!(load_problem(&dir, &saved, false).unwrap(), old);
+        assert_eq!(
+            load_problem(&dir, &unsaved, false).unwrap().time_limit,
+            "3 sec"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

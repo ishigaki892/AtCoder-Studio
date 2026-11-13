@@ -1,7 +1,8 @@
 // 自力 AC・解説 AC の記録（Phase 33。D-257）と、解き直しの印（Phase 34。D-258）
 //
 // 問題 ID ごとに「自力」「解説」と「解き直す」を手で付け、アプリのフォルダの problem-marks.json に保存する。
-// 形：{ "version": 1, "problems": { "abc001_1": { "solved": "editorial", "retry": "2026-11-12" } } }。retry は印を付けた日。
+// 形：{ "version": 1, "problems": { "abc001_1": { "solved": "editorial", "solvedOn": "2026-11-13", "retry": "2026-11-12" } } }。
+// retry は印を付けた日、solvedOn は「自力」「解説」を付けた日（Phase 37。D-261。前の版の記録にはない）。
 // 書き方・権限・読めないときの退避は、ほかの作業データと同じ（D-034〜D-041。storage.rs の load_json・write_atomic）。
 // AtCoder・AtCoder Problems には何も送らない
 
@@ -35,6 +36,10 @@ pub enum SolvedBy {
 pub struct Mark {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub solved: Option<SolvedBy>,
+    // 「自力」「解説」を付けた日（手元の日付。D-261）。付けたとき・切り替えたときに変わり、外すと消える。
+    // Phase 37 より前に付けた記録にはない
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub solved_on: Option<String>,
     // 解き直しの印を付けた日（手元の日付。例 "2026-11-12"。D-258）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry: Option<String>,
@@ -98,6 +103,9 @@ fn parse(value: Value) -> Option<Marks> {
             .into_iter()
             .map(|(id, mut mark)| {
                 mark.retry = mark.retry.filter(|date| valid_date(date));
+                mark.solved_on = mark
+                    .solved_on
+                    .filter(|date| mark.solved.is_some() && valid_date(date));
                 (id, mark)
             })
             .filter(|(id, mark)| problem::valid_id(id) && !mark.is_empty())
@@ -119,13 +127,23 @@ pub fn load(dir: &Path) -> Result<(Marks, Option<PathBuf>), String> {
     read(dir)
 }
 
-// 1 問の「どう解いたか」を変える（None で記録なし）。変えたあとのすべての記録と、読むときに退避した先を返す
+// 1 問の「どう解いたか」を変える（None で記録なし）。変えたあとのすべての記録と、読むときに退避した先を返す。
+// 付けたとき・切り替えたときは、付けた日を date にする（同じものをもう一度付けても変えない。D-261）。外すと付けた日も消す
 pub fn set_solved(
     dir: &Path,
     id: &str,
     solved: Option<SolvedBy>,
+    date: &str,
 ) -> Result<(Marks, Option<PathBuf>), String> {
-    update(dir, id, |mark| mark.solved = solved)
+    if !valid_date(date) {
+        return Err("日付の形が正しくありません".to_string());
+    }
+    update(dir, id, |mark| {
+        if mark.solved != solved {
+            mark.solved_on = solved.map(|_| date.to_string());
+        }
+        mark.solved = solved;
+    })
 }
 
 // 1 問の解き直しの印を変える（Some(日付) で付ける、None で外す。D-258）。すでに付いていれば、付けた日は変えない
@@ -191,13 +209,16 @@ mod tests {
         }
     }
 
+    // テストの日付
+    const D: &str = "2026-11-13";
+
     #[test]
     fn saves_changes_and_clears_marks() {
         let dir = TempDir::new("save");
         assert_eq!(load(&dir.0).unwrap(), (Marks::new(), None));
 
-        set_solved(&dir.0, "abc001_1", Some(SolvedBy::Editorial)).unwrap();
-        let (marks, backup) = set_solved(&dir.0, "arc058_a", Some(SolvedBy::Myself)).unwrap();
+        set_solved(&dir.0, "abc001_1", Some(SolvedBy::Editorial), D).unwrap();
+        let (marks, backup) = set_solved(&dir.0, "arc058_a", Some(SolvedBy::Myself), D).unwrap();
         assert_eq!(backup, None);
         assert_eq!(marks.len(), 2);
         // ファイルの形（D-257）
@@ -208,14 +229,15 @@ mod tests {
         assert_eq!(value["problems"]["arc058_a"]["solved"], "self");
 
         // 替える・外す。外した問題はファイルから消える
-        set_solved(&dir.0, "abc001_1", Some(SolvedBy::Myself)).unwrap();
-        let (marks, _) = set_solved(&dir.0, "arc058_a", None).unwrap();
+        set_solved(&dir.0, "abc001_1", Some(SolvedBy::Myself), D).unwrap();
+        let (marks, _) = set_solved(&dir.0, "arc058_a", None, D).unwrap();
         assert_eq!(
             marks.into_iter().collect::<Vec<_>>(),
             vec![(
                 "abc001_1".to_string(),
                 Mark {
                     solved: Some(SolvedBy::Myself),
+                    solved_on: Some(D.to_string()),
                     retry: None
                 }
             )]
@@ -230,7 +252,7 @@ mod tests {
         let dir = TempDir::new("ids");
         for id in ["", "ABC001_1", "../x", "a b", &"a".repeat(65)] {
             assert!(
-                set_solved(&dir.0, id, Some(SolvedBy::Myself)).is_err(),
+                set_solved(&dir.0, id, Some(SolvedBy::Myself), D).is_err(),
                 "{id}"
             );
         }
@@ -263,7 +285,7 @@ mod tests {
         }
         // 退避したあとに付けた記録は保存される
         std::fs::write(dir.0.join(MARKS_FILE), "{").unwrap();
-        let (marks, backup) = set_solved(&dir.0, "abc001_1", Some(SolvedBy::Editorial)).unwrap();
+        let (marks, backup) = set_solved(&dir.0, "abc001_1", Some(SolvedBy::Editorial), D).unwrap();
         assert!(backup.is_some());
         assert_eq!(marks.len(), 1);
         assert_eq!(load(&dir.0).unwrap().0.len(), 1);
@@ -277,8 +299,8 @@ mod tests {
         let (marks, _) = set_retry(&dir.0, "abc001_1", Some("2026-11-12".to_string())).unwrap();
         assert_eq!(marks["abc001_1"].retry.as_deref(), Some("2026-11-10"));
         // 自力・解説とは別に持つ
-        set_solved(&dir.0, "abc001_1", Some(SolvedBy::Editorial)).unwrap();
-        let (marks, _) = set_solved(&dir.0, "abc001_1", None).unwrap();
+        set_solved(&dir.0, "abc001_1", Some(SolvedBy::Editorial), D).unwrap();
+        let (marks, _) = set_solved(&dir.0, "abc001_1", None, D).unwrap();
         assert_eq!(marks["abc001_1"].retry.as_deref(), Some("2026-11-10"));
         let text = std::fs::read_to_string(dir.0.join(MARKS_FILE)).unwrap();
         let value: Value = serde_json::from_str(&text).unwrap();
@@ -298,5 +320,38 @@ mod tests {
         assert_eq!(marks.keys().collect::<Vec<_>>(), ["abc002_1"]);
         assert_eq!(marks["abc002_1"].retry, None);
         assert!(valid_date(&today()));
+    }
+
+    #[test]
+    fn records_when_solved_marks_are_set() {
+        let dir = TempDir::new("solved-on");
+        set_solved(&dir.0, "abc001_1", Some(SolvedBy::Editorial), "2026-11-10").unwrap();
+        // 同じものをもう一度付けても、付けた日は変わらない
+        let (marks, _) =
+            set_solved(&dir.0, "abc001_1", Some(SolvedBy::Editorial), "2026-11-12").unwrap();
+        assert_eq!(marks["abc001_1"].solved_on.as_deref(), Some("2026-11-10"));
+        let text = std::fs::read_to_string(dir.0.join(MARKS_FILE)).unwrap();
+        let value: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(value["problems"]["abc001_1"]["solvedOn"], "2026-11-10");
+        // 切り替えると付け直す
+        let (marks, _) =
+            set_solved(&dir.0, "abc001_1", Some(SolvedBy::Myself), "2026-11-13").unwrap();
+        assert_eq!(marks["abc001_1"].solved_on.as_deref(), Some("2026-11-13"));
+        // 外すと付けた日も消える（解き直しの印は残る）
+        set_retry(&dir.0, "abc001_1", Some("2026-11-11".to_string())).unwrap();
+        let (marks, _) = set_solved(&dir.0, "abc001_1", None, "2026-11-14").unwrap();
+        assert_eq!(marks["abc001_1"].solved_on, None);
+        assert_eq!(marks["abc001_1"].retry.as_deref(), Some("2026-11-11"));
+        assert!(set_solved(&dir.0, "abc001_1", Some(SolvedBy::Myself), "11/14").is_err());
+        // 前の版の記録（solvedOn がない）も読める。形の正しくない日付と、solved のない solvedOn は使わない
+        std::fs::write(
+            dir.0.join(MARKS_FILE),
+            r#"{"version":1,"problems":{"abc001_1":{"solved":"editorial"},"abc002_1":{"solved":"self","solvedOn":"x"},"abc003_1":{"solvedOn":"2026-11-13","retry":"2026-11-13"}}}"#,
+        )
+        .unwrap();
+        let (marks, backup) = load(&dir.0).unwrap();
+        assert_eq!(backup, None);
+        assert_eq!(marks["abc001_1"].solved, Some(SolvedBy::Editorial));
+        assert!(marks.values().all(|mark| mark.solved_on.is_none()));
     }
 }

@@ -2,7 +2,7 @@
 // 列は問題の記号の表を出す。ますは AtCoder Problems の diff の色、背景で AC 状況（AC は緑、AC していない提出があれば黄）。
 // 解説 AC（手で付けた記録。D-257）は、AC の緑の代わりに別の色。解き直しの印（D-258）は、ますの右上の三角。
 // ますを押すと、その問題を問題文の欄に出す。読むのは Rust 側（src-tauri/src/atcoder_problems.rs）。
-// 「解き直し」（D-258）は、印を付けた問題の一覧（RetryList.tsx）。
+// 「解き直し」（D-258）は、印を付けた問題の一覧、「解説 AC」（D-261）は「解説」を付けた問題の一覧（どちらも RetryList.tsx）。
 // 「JOI」（D-260）は小分けを選んで出す。JOI の表は、列が何問目かで、ますには diff の代わりに問題の記号を出す（diff はない）
 import { useEffect, useRef, useState } from "react";
 import type { ProblemId } from "../ipc/problem";
@@ -28,7 +28,7 @@ const CATEGORIES: { id: "abc" | "arc" | "agc" | "awc"; label: string }[] = [
 ];
 
 // 上の切り替え。「JOI」は小分け（joiKind）の表を出す
-type Choice = "abc" | "arc" | "agc" | "awc" | "joi" | "retry";
+type Choice = "abc" | "arc" | "agc" | "awc" | "joi" | "retry" | "editorial";
 
 type Props = {
   // 設定の AtCoder の ID（変わったら読み直す。読むときは Rust 側が設定から読む）。空なら、ログインしているアカウントの ID を使う
@@ -69,7 +69,7 @@ function PastProblems({ user, loggedIn, current, onSelect, marks, onRetry, joiKi
   // 表の種類、「JOI」、または「解き直し」の一覧
   const [category, setCategory] = useState<Choice>("abc");
   // 読む表（「JOI」なら小分け）
-  const target: PastCategory | "retry" = category === "joi" ? joiKind : category;
+  const target: PastCategory | "retry" | "editorial" = category === "joi" ? joiKind : category;
   const joi = category === "joi";
   const [view, setView] = useState<PastView | null>(null);
   // view の表の種類
@@ -102,14 +102,14 @@ function PastProblems({ user, loggedIn, current, onSelect, marks, onRetry, joiKi
 
   // 開いたとき・種類を替えたとき・ID を変えたとき・ログインの状態が変わったとき（「解き直し」は RetryList が読む）
   useEffect(() => {
-    if (target !== "retry") {
+    if (target !== "retry" && target !== "editorial") {
       void read(target, false);
     }
   }, [target, user, loggedIn]);
 
   const tabs = (
     <div className="past-categories" role="tablist" aria-label="コンテストの種類">
-      {[...CATEGORIES, { id: "joi" as const, label: "JOI" }, { id: "retry" as const, label: "解き直し" }].map(({ id, label }) => (
+      {[...CATEGORIES, { id: "joi" as const, label: "JOI" }, { id: "retry" as const, label: "解き直し" }, { id: "editorial" as const, label: "解説 AC" }].map(({ id, label }) => (
         <button
           key={id}
           type="button"
@@ -123,9 +123,9 @@ function PastProblems({ user, loggedIn, current, onSelect, marks, onRetry, joiKi
       ))}
     </div>
   );
-  if (target === "retry") {
+  if (target === "retry" || target === "editorial") {
     return (
-      <RetryList tabs={tabs} user={user} loggedIn={loggedIn} current={current} onSelect={onSelect} marks={marks} onRetry={onRetry} />
+      <RetryList key={target} mode={target} tabs={tabs} user={user} loggedIn={loggedIn} current={current} onSelect={onSelect} marks={marks} onRetry={onRetry} />
     );
   }
 
