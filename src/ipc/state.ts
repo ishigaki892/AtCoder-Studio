@@ -17,6 +17,8 @@ export type Layout = {
   pastProblems: string;
   // 中央の「設定」のタブ（Phase 26。D-246）：closed・open・active。前の版の state.json にはない
   settingsTab: string;
+  // 「過去問」の「JOI」で選んでいた小分け（Phase 36。D-260）。前の版の state.json にはない（知らない値は一次予選）
+  pastJoi: string;
 };
 
 export type LoadedKeyBinding = {

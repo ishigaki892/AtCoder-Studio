@@ -3090,6 +3090,23 @@ body.hide-breadcrumbs .breadcrumbs {
   color: var(--fg-muted);
 }
 
+/* JOI の小分けの切り替え（Phase 36。D-260）。見出しの行の下に出す */
+.past-subkinds {
+  flex-wrap: wrap;
+}
+
+/* JOI の表のますの問題の記号（diff はない）。長い記号（fortune_telling など）は切り、全部は説明に出す */
+.past-index {
+  display: inline-block;
+  max-width: 7em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: bottom;
+  color: var(--fg-default);
+  font-weight: normal;
+}
+
 /* 設定の「過去問」の AtCoder の ID の欄 */
 .settings-field {
   display: flex;

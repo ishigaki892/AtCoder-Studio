@@ -135,6 +135,7 @@ import SubmissionPanel, { upsertSubmission, type SubmitNotice } from "./panels/S
 import { copyText } from "./panels/copyText";
 import { askRestartPackage, copySource, createRandomPrograms, restartPackage } from "./ipc/scaffold";
 import { problemMarks, setProblemMark, setProblemRetry, type ProblemMarks, type SolvedBy } from "./ipc/problemMarks";
+import { joiKindOf, type JoiKind } from "./ipc/atcoderProblems";
 import {
   atcoderLogin,
   atcoderLogout,
@@ -1187,6 +1188,8 @@ function App() {
   const [extraActive, setExtraActive] = useState<ExtraKind | null>(null);
   // state.json から読んだもの（起動のときの読み戻しに使う）
   const savedExtraRef = useRef<Record<ExtraKind, string>>({ past: "closed", settings: "closed" });
+  // 「過去問」の「JOI」で選んでいる小分け（D-260）。過去問のタブを閉じても、アプリを開き直しても残す
+  const [pastJoi, setPastJoi] = useState<JoiKind>("joi-yo1");
   // ファイルのタブが替わったら（開いた・選んだ・デバッグで止まった行へ移ったなど）、ファイルでないタブから離れる。
   // 手前だったファイルのタブを閉じた・消した・名前を変えたことで替わったときは離れない（裏のタブを閉じても、
   // 設定・過去問のタブは手前のまま。C-8）
@@ -1246,6 +1249,7 @@ function App() {
           setSidebar({ width: l.sidebarWidth, visible: l.sidebarVisible });
           setSidebarView(sidebarViewOf(l.sidebarView));
           savedExtraRef.current = { past: l.pastProblems ?? "closed", settings: l.settingsTab ?? "closed" };
+          setPastJoi(joiKindOf(l.pastJoi ?? ""));
           setRightColumn({ width: l.rightWidth, visible: l.rightVisible });
           setBottomPanel({ ratio: l.bottomRatio, visible: l.bottomVisible });
           setBottomRightPanel({ ratio: l.bottomRightRatio, visible: l.bottomRightVisible });
@@ -1728,6 +1732,7 @@ function App() {
         sidebarView,
         pastProblems: extraState("past"),
         settingsTab: extraState("settings"),
+        pastJoi,
       },
       // 読み取り専用のタブ（作業領域の外のソース）と、アプリのフォルダのファイルのタブ（D-247）は、再起動では戻さない
       tabs.tabs.filter((tab) => !tab.readOnly && !isAppKey(tab.path)).map((tab) => tab.path),
@@ -1761,6 +1766,7 @@ function App() {
     workspaceName,
     extraOpen,
     extraActive,
+    pastJoi,
   ]);
 
   // ウィンドウを閉じる・アプリを終える前に、未保存のタブと state.json を保存する（D-084）。
@@ -2095,6 +2101,8 @@ function App() {
               onSelect={showProblem}
               marks={marks}
               onRetry={changeRetry}
+              joiKind={pastJoi}
+              onJoiKind={setPastJoi}
             />
           )}
           {extraActive === null && activeTab?.readOnly && (

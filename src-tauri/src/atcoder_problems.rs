@@ -285,6 +285,91 @@ pub fn category_of(contest: &str, category: &str) -> bool {
         && contest[3..].bytes().all(|b| b.is_ascii_digit())
 }
 
+// JOI の表の小分け（Phase 36。D-260）。コンテスト ID の形で決める。どれにも当てはまらない joi で始まるものは「その他」
+pub const JOI_KINDS: [&str; 7] = [
+    "joi-yo1",
+    "joi-yo",
+    "joi-ho",
+    "joi-sc",
+    "joi-open",
+    "joig",
+    "joi-other",
+];
+
+// 頭の 4 文字が数字（年）なら、その後ろ
+fn after_year(text: &str) -> Option<&str> {
+    let year = text.get(..4)?;
+    year.bytes().all(|b| b.is_ascii_digit()).then(|| &text[4..])
+}
+
+// JOI のコンテストの小分け。JOI でなければ None
+// - joi-yo1：一次予選（joi2020yo1a・yo1b・yo1c）
+// - joi-yo：予選（joi2006yo〜joi2019yo）・二次予選（joi2020yo2〜）
+// - joi-ho：本選（joi2006ho〜joi2025ho）・セミファイナルステージ（joi2026sf）・ファイナルステージ（joi2026final）
+// - joi-sc：春合宿（joisc2007・joisc2013-day1・joisp2023 など）
+// - joi-open：JOI Open Contest（joiopen2012・joiopen2012b など）
+// - joig：JOIG（joig2021-open・joigsp2023・joigsc2022・joig2026final など。joig で始まるもの）
+pub fn joi_kind(contest: &str) -> Option<&'static str> {
+    let rest = contest.strip_prefix("joi")?;
+    if rest.starts_with('g') {
+        return Some("joig");
+    }
+    let one_letter = |r: &str| r.len() == 1 && r.bytes().all(|b| b.is_ascii_lowercase());
+    if let Some(r) = rest.strip_prefix("open").and_then(after_year)
+        && (r.is_empty() || one_letter(r))
+    {
+        return Some("joi-open");
+    }
+    if let Some(r) = rest.strip_prefix("sc").and_then(after_year)
+        && (r.is_empty()
+            || r.strip_prefix("-day")
+                .is_some_and(|d| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit())))
+    {
+        return Some("joi-sc");
+    }
+    if rest.strip_prefix("sp").and_then(after_year) == Some("") {
+        return Some("joi-sc");
+    }
+    if let Some(r) = after_year(rest) {
+        match r {
+            "ho" | "sf" | "final" => return Some("joi-ho"),
+            "yo" | "yo2" => return Some("joi-yo"),
+            _ if r.strip_prefix("yo1").is_some_and(one_letter) => return Some("joi-yo1"),
+            _ => {}
+        }
+    }
+    Some("joi-other")
+}
+
+// コンテストがその表に入るか
+fn in_category(contest: &str, category: &str) -> bool {
+    if JOI_KINDS.contains(&category) {
+        joi_kind(contest) == Some(category)
+    } else {
+        category_of(contest, category)
+    }
+}
+
+// JOI の回の中の問題の並べ方：記号の数字の部分は数として比べる（K1・K2 … K6・L、1・2 … 、英単語はアルファベット順）
+fn natural_key(index: &str) -> Vec<(u8, u64, String)> {
+    let mut key = Vec::new();
+    let mut rest = index;
+    while let Some(first) = rest.chars().next() {
+        let digit = first.is_ascii_digit();
+        let end = rest
+            .find(|c: char| c.is_ascii_digit() != digit)
+            .unwrap_or(rest.len());
+        let (run, next) = rest.split_at(end);
+        key.push(if digit {
+            (0, run.parse().unwrap_or(u64::MAX), String::new())
+        } else {
+            (1, 0, run.to_string())
+        });
+        rest = next;
+    }
+    key
+}
+
 // 列の並べ方：記号の順。Ex は H の後ろ（ABC の 8 問目。H と同じ回にはない）
 fn index_key(index: &str) -> String {
     if index == "Ex" {
@@ -306,6 +391,8 @@ pub enum Solved {
 #[serde(rename_all = "camelCase")]
 pub struct Cell {
     pub problem: String,
+    // 問題の記号（例：A・K1・anagram）。JOI の表では、ますに diff の代わりに出す（D-260）
+    pub index: String,
     pub difficulty: Option<DifficultyView>,
     pub solved: Option<Solved>,
 }
@@ -328,7 +415,8 @@ pub struct Table {
     pub total: usize,
 }
 
-// 表を組み立てる。始まっていないコンテストは入れない。新しい順
+// 表を組み立てる。始まっていないコンテストは入れない。新しい順。
+// JOI の小分け（D-260）では、列は「1・2・3 …」（その回の何問目か）にし、回の中は記号の順（natural_key）に並べる
 pub fn build_table(
     category: &str,
     contests: &[Contest],
@@ -339,7 +427,7 @@ pub fn build_table(
 ) -> Table {
     let mut chosen: Vec<&Contest> = contests
         .iter()
-        .filter(|c| category_of(&c.id, category) && c.start <= now)
+        .filter(|c| in_category(&c.id, category) && c.start <= now)
         .collect();
     chosen.sort_by(|a, b| b.start.cmp(&a.start).then(b.id.cmp(&a.id)));
     let mut by_contest: HashMap<&str, Vec<&ContestProblem>> = HashMap::new();
@@ -349,13 +437,30 @@ pub fn build_table(
             .or_default()
             .push(problem);
     }
-    let mut columns: Vec<String> = chosen
-        .iter()
-        .flat_map(|c| by_contest.get(c.id.as_str()).into_iter().flatten())
-        .map(|p| p.index.clone())
-        .collect();
-    columns.sort_by_key(|index| index_key(index));
-    columns.dedup();
+    let by_position = JOI_KINDS.contains(&category);
+    if by_position {
+        for list in by_contest.values_mut() {
+            list.sort_by_key(|p| natural_key(&p.index));
+        }
+    }
+    let mut columns: Vec<String> = if by_position {
+        let most = chosen
+            .iter()
+            .map(|c| by_contest.get(c.id.as_str()).map_or(0, Vec::len))
+            .max()
+            .unwrap_or(0);
+        (1..=most).map(|n| n.to_string()).collect()
+    } else {
+        chosen
+            .iter()
+            .flat_map(|c| by_contest.get(c.id.as_str()).into_iter().flatten())
+            .map(|p| p.index.clone())
+            .collect()
+    };
+    if !by_position {
+        columns.sort_by_key(|index| index_key(index));
+        columns.dedup();
+    }
     let (mut accepted, mut total) = (0, 0);
     let rows = chosen
         .iter()
@@ -366,8 +471,13 @@ pub fn build_table(
                 .unwrap_or_default();
             let cells = columns
                 .iter()
-                .map(|column| {
-                    let problem = list.iter().find(|p| &p.index == column)?;
+                .enumerate()
+                .map(|(position, column)| {
+                    let problem = if by_position {
+                        list.get(position)?
+                    } else {
+                        list.iter().find(|p| &p.index == column)?
+                    };
                     let state = solved.get(&problem.problem).copied();
                     total += 1;
                     if state == Some(Solved::Accepted) {
@@ -375,6 +485,7 @@ pub fn build_table(
                     }
                     Some(Cell {
                         problem: problem.problem.clone(),
+                        index: problem.index.clone(),
                         difficulty: models.get(&problem.problem).copied(),
                         solved: state,
                     })
@@ -529,6 +640,8 @@ pub struct PastView {
     pub solved_complete: bool,
     // 読めなかったもの（保存してあるもので出しているときも）
     pub messages: Vec<String>,
+    // JOI の「その他」に入る、始まったコンテストがあるか（D-260。あるときだけ画面に「その他」を出す）
+    pub joi_other: bool,
 }
 
 // 表を返す（D-242）。refresh なら、データのファイルも 24 時間を待たずに読み直す。update_solved なら提出の続きを読む
@@ -541,7 +654,7 @@ pub fn past_view(
     now: SystemTime,
     fetch: &mut Fetch,
 ) -> Result<PastView, String> {
-    if !CATEGORIES.contains(&category) {
+    if !CATEGORIES.contains(&category) && !JOI_KINDS.contains(&category) {
         return Err("表の種類が正しくありません".to_string());
     }
     let mut messages = Vec::new();
@@ -606,11 +719,15 @@ pub fn past_view(
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
+    let joi_other = contests
+        .iter()
+        .any(|c| c.start <= now_secs && joi_kind(&c.id) == Some("joi-other"));
     Ok(PastView {
         table: build_table(category, &contests, &problems, &models, &solved, now_secs),
         user: user.map(str::to_string),
         solved_complete,
         messages,
+        joi_other,
     })
 }
 
@@ -1037,6 +1154,117 @@ mod tests {
         }
     }
 
+    #[test]
+    fn sorts_joi_contests_into_kinds() {
+        // AtCoder Problems のデータにある形（docs/phase36/01-pre-start.md §2.1）
+        let cases = [
+            ("joi2020yo1a", "joi-yo1"),
+            ("joi2027yo1c", "joi-yo1"),
+            ("joi2006yo", "joi-yo"),
+            ("joi2026yo2", "joi-yo"),
+            ("joi2025ho", "joi-ho"),
+            ("joi2026sf", "joi-ho"),
+            ("joi2026final", "joi-ho"),
+            ("joisc2007", "joi-sc"),
+            ("joisc2013-day4", "joi-sc"),
+            ("joisp2025", "joi-sc"),
+            ("joiopen2012", "joi-open"),
+            ("joiopen2012b", "joi-open"),
+            ("joig2021-open", "joig"),
+            ("joigsp2023", "joig"),
+            ("joigsc2022", "joig"),
+            ("joig2026final", "joig"),
+            // これから増えるかもしれない形は「その他」
+            ("joi2028yo3", "joi-other"),
+            ("joisc2013-day", "joi-other"),
+            ("joiopen2012bc", "joi-other"),
+            ("joi20x6ho", "joi-other"),
+            ("joi", "joi-other"),
+        ];
+        for (contest, kind) in cases {
+            assert_eq!(joi_kind(contest), Some(kind), "{contest}");
+        }
+        for contest in ["abc001", "jag2020", "j0i2020ho", ""] {
+            assert_eq!(joi_kind(contest), None, "{contest}");
+        }
+        // JOI の小分けは ABC などの表には入らない
+        assert!(!in_category("joi2025ho", "abc") && in_category("joi2025ho", "joi-ho"));
+    }
+
+    #[test]
+    fn builds_joi_tables_by_position() {
+        let contests = parse_contests(
+            r#"[{"id":"joisc2007","start_epoch_second":100,"title":"2007年 日本情報オリンピック春合宿OJ"},
+                {"id":"joisc2020","start_epoch_second":200,"title":"JOI 春合宿 2020"},
+                {"id":"joisp2025","start_epoch_second":300,"title":"JOI 2024/2025 春季トレーニング"},
+                {"id":"joisp2027","start_epoch_second":9000,"title":"まだ始まっていない"},
+                {"id":"joi2025ho","start_epoch_second":400,"title":"本選"}]"#,
+        )
+        .unwrap();
+        let problems = parse_contest_problems(
+            r#"[{"contest_id":"joisc2007","problem_id":"joisc2007_packin2","problem_index":"packing2"},
+                {"contest_id":"joisc2007","problem_id":"joisc2007_anagra","problem_index":"anagram"},
+                {"contest_id":"joisc2007","problem_id":"joisc2007_packin10","problem_index":"packing10"},
+                {"contest_id":"joisc2020","problem_id":"joisc2020_l","problem_index":"L"},
+                {"contest_id":"joisc2020","problem_id":"joisc2020_k2","problem_index":"K2"},
+                {"contest_id":"joisc2020","problem_id":"joisc2020_k1","problem_index":"K1"},
+                {"contest_id":"joisc2020","problem_id":"joisc2020_a","problem_index":"A"},
+                {"contest_id":"joisp2025","problem_id":"joisp2025_a","problem_index":"A"},
+                {"contest_id":"joisp2027","problem_id":"joisp2027_a","problem_index":"A"},
+                {"contest_id":"joi2025ho","problem_id":"joi2025ho_a","problem_index":"A"}]"#,
+        )
+        .unwrap();
+        let solved: HashMap<String, Solved> =
+            [("joisc2020_k1".to_string(), Solved::Accepted)].into();
+        let table = build_table(
+            "joi-sc",
+            &contests,
+            &problems,
+            &Models::default(),
+            &solved,
+            5000,
+        );
+        // 列は何問目か（いちばん問題の多い回の数まで）。始まっていない回・本選は入らない。新しい順
+        assert_eq!(table.columns, ["1", "2", "3", "4"]);
+        let ids: Vec<&str> = table.rows.iter().map(|r| r.contest.as_str()).collect();
+        assert_eq!(ids, ["joisp2025", "joisc2020", "joisc2007"]);
+        let indexes = |row: &Row| -> Vec<Option<String>> {
+            row.cells
+                .iter()
+                .map(|cell| cell.as_ref().map(|c| c.index.clone()))
+                .collect()
+        };
+        let some = |items: &[&str]| -> Vec<Option<String>> {
+            items.iter().map(|i| Some(i.to_string())).collect()
+        };
+        // 回の中は記号の順。数字の部分は数として比べる（packing2 は packing10 より前、K1・K2 は L より前）
+        assert_eq!(indexes(&table.rows[1]), some(&["A", "K1", "K2", "L"]));
+        let mut words = some(&["anagram", "packing2", "packing10"]);
+        words.push(None);
+        assert_eq!(indexes(&table.rows[2]), words);
+        assert_eq!(
+            indexes(&table.rows[0]),
+            [Some("A".to_string()), None, None, None]
+        );
+        let k1 = table.rows[1].cells[1].as_ref().unwrap();
+        assert_eq!(
+            (k1.problem.as_str(), k1.solved),
+            ("joisc2020_k1", Some(Solved::Accepted))
+        );
+        assert_eq!((table.accepted, table.total), (1, 8));
+        // ABC などの表は今までどおり、列は記号で、ますにも記号を持つ
+        let table = build_table(
+            "joi-ho",
+            &contests,
+            &problems,
+            &Models::default(),
+            &solved,
+            5000,
+        );
+        assert_eq!(table.columns, ["1"]);
+        assert_eq!(table.rows[0].cells[0].as_ref().unwrap().index, "A");
+    }
+
     fn submissions(range: std::ops::Range<i64>, problem: &str, result: &str) -> String {
         let items: Vec<String> = range
             .map(|epoch| format!(r#"{{"id":{epoch},"epoch_second":{epoch},"problem_id":"{problem}","result":"{result}"}}"#))
@@ -1158,6 +1386,10 @@ mod tests {
         assert_eq!(view.table.accepted, 1);
         assert_eq!(view.messages.len(), 4, "{:?}", view.messages);
         assert!(past_view(&dir.0, "ahc", None, false, false, now, &mut failing).is_err());
+        // JOI の小分けも読める（D-260）。テストのデータに JOI はないので、表は空で「その他」もない
+        let view = past_view(&dir.0, "joi-ho", None, false, false, now, &mut failing).unwrap();
+        assert!(view.table.rows.is_empty() && !view.joi_other);
+        assert!(past_view(&dir.0, "joi", None, false, false, now, &mut failing).is_err());
     }
 
     #[test]

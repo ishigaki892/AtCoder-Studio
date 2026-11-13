@@ -50,6 +50,10 @@ pub struct Layout {
     // 中央の「設定」のタブ（Phase 26。D-246）：closed・open・active。前の版の state.json にはないので、なければ閉じている
     #[serde(default)]
     pub settings_tab: String,
+    // 「過去問」の「JOI」で選んでいた小分け（Phase 36。D-260）。値は画面側が確かめる（知らなければ一次予選）。
+    // 前の版の state.json にはないので、なければ空
+    #[serde(default)]
+    pub past_joi: String,
 }
 
 fn default_sidebar_view() -> String {
@@ -1078,6 +1082,7 @@ mod tests {
                 sidebar_view: "debug".to_string(),
                 past_problems: "active".to_string(),
                 settings_tab: "open".to_string(),
+                past_joi: "joi-ho".to_string(),
             },
             workspace: Some(PathBuf::from("/tmp/ws")),
             tabs: vec!["src/main.rs".to_string()],

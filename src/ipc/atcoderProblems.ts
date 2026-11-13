@@ -20,10 +20,27 @@ export function difficultyText(view: DifficultyView): string {
   return `diff ${view.value}${view.experimental ? "?" : ""}`;
 }
 
-// 中央の「過去問」のタブの表（Phase 24 作業 2。D-242。AWC は D-255）
-export type PastCategory = "abc" | "arc" | "agc" | "awc";
+// JOI の表の小分け（Phase 36。D-260）。分け方は Rust 側（atcoder_problems.rs の joi_kind）
+export type JoiKind = "joi-yo1" | "joi-yo" | "joi-ho" | "joi-sc" | "joi-open" | "joig" | "joi-other";
+export const JOI_KINDS: { id: JoiKind; label: string }[] = [
+  { id: "joi-yo1", label: "一次予選" },
+  { id: "joi-yo", label: "予選・二次予選" },
+  { id: "joi-ho", label: "本選" },
+  { id: "joi-sc", label: "春合宿" },
+  { id: "joi-open", label: "JOI Open" },
+  { id: "joig", label: "JOIG" },
+  { id: "joi-other", label: "その他" },
+];
+// 知らない値（前の版の state.json など）は一次予選
+export function joiKindOf(value: string): JoiKind {
+  return JOI_KINDS.some((kind) => kind.id === value) ? (value as JoiKind) : "joi-yo1";
+}
+
+// 中央の「過去問」のタブの表（Phase 24 作業 2。D-242。AWC は D-255。JOI の小分けは D-260）
+export type PastCategory = "abc" | "arc" | "agc" | "awc" | JoiKind;
 export type Solved = "accepted" | "tried";
-export type PastCell = { problem: string; difficulty: DifficultyView | null; solved: Solved | null };
+// index は問題の記号（例：A・K1・anagram）。JOI の表では、ますに diff の代わりに出す
+export type PastCell = { problem: string; index: string; difficulty: DifficultyView | null; solved: Solved | null };
 export type PastRow = { contest: string; title: string; cells: (PastCell | null)[] };
 export type PastView = {
   table: { columns: string[]; rows: PastRow[]; accepted: number; total: number };
@@ -32,6 +49,8 @@ export type PastView = {
   // 提出を最後まで読めている（上限の回数で止めたときは false）
   solvedComplete: boolean;
   messages: string[];
+  // JOI の「その他」に入る、始まったコンテストがあるか（あるときだけ「その他」を出す）
+  joiOther: boolean;
 };
 
 // refresh（「更新」）なら、データのファイルも読み直し、提出の続きを読む。開いたときは、提出は 1 分ごと

@@ -2,12 +2,15 @@
 // 列は問題の記号の表を出す。ますは AtCoder Problems の diff の色、背景で AC 状況（AC は緑、AC していない提出があれば黄）。
 // 解説 AC（手で付けた記録。D-257）は、AC の緑の代わりに別の色。解き直しの印（D-258）は、ますの右上の三角。
 // ますを押すと、その問題を問題文の欄に出す。読むのは Rust 側（src-tauri/src/atcoder_problems.rs）。
-// 「解き直し」（D-258）は、印を付けた問題の一覧（RetryList.tsx）
+// 「解き直し」（D-258）は、印を付けた問題の一覧（RetryList.tsx）。
+// 「JOI」（D-260）は小分けを選んで出す。JOI の表は、列が何問目かで、ますには diff の代わりに問題の記号を出す（diff はない）
 import { useEffect, useRef, useState } from "react";
 import type { ProblemId } from "../ipc/problem";
 import {
   difficultyHint,
+  JOI_KINDS,
   pastProblems,
+  type JoiKind,
   type PastCategory,
   type PastCell,
   type PastView,
@@ -16,13 +19,16 @@ import { ratingClass } from "../rating";
 import type { ProblemMarks } from "../ipc/problemMarks";
 import RetryList from "./RetryList";
 
-const CATEGORIES: { id: PastCategory; label: string }[] = [
+const CATEGORIES: { id: "abc" | "arc" | "agc" | "awc"; label: string }[] = [
   { id: "abc", label: "ABC" },
   { id: "arc", label: "ARC" },
   { id: "agc", label: "AGC" },
   // AtCoder Weekday Contest。AtCoder Problems に diff がないので、ますは「—」と AC 状況の背景だけ
   { id: "awc", label: "AWC" },
 ];
+
+// 上の切り替え。「JOI」は小分け（joiKind）の表を出す
+type Choice = "abc" | "arc" | "agc" | "awc" | "joi" | "retry";
 
 type Props = {
   // 設定の AtCoder の ID（変わったら読み直す。読むときは Rust 側が設定から読む）。空なら、ログインしているアカウントの ID を使う
@@ -37,6 +43,9 @@ type Props = {
   marks: ProblemMarks;
   // 解き直しの印を外すとき（「解き直し」の一覧の「外す」）
   onRetry: (id: string, on: boolean) => Promise<void>;
+  // 「JOI」で選んでいる小分け（D-260。App.tsx が state.json に残す）
+  joiKind: JoiKind;
+  onJoiKind: (kind: JoiKind) => void;
 };
 
 // ますの説明の AC 状況と記録の行（D-257）
@@ -56,10 +65,15 @@ function retryHint(problem: string, marks: ProblemMarks): string {
   return since ? `解き直す（${since} から）` : "";
 }
 
-function PastProblems({ user, loggedIn, current, onSelect, marks, onRetry }: Props) {
-  // 表の種類、または「解き直し」の一覧
-  const [category, setCategory] = useState<PastCategory | "retry">("abc");
+function PastProblems({ user, loggedIn, current, onSelect, marks, onRetry, joiKind, onJoiKind }: Props) {
+  // 表の種類、「JOI」、または「解き直し」の一覧
+  const [category, setCategory] = useState<Choice>("abc");
+  // 読む表（「JOI」なら小分け）
+  const target: PastCategory | "retry" = category === "joi" ? joiKind : category;
+  const joi = category === "joi";
   const [view, setView] = useState<PastView | null>(null);
+  // view の表の種類
+  const [shown, setShown] = useState<PastCategory | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // 読む順番（遅れて届いた、前の種類の結果を使わない）
@@ -72,6 +86,7 @@ function PastProblems({ user, loggedIn, current, onSelect, marks, onRetry }: Pro
       const next = await pastProblems(target, refresh);
       if (mine === seq.current) {
         setView(next);
+        setShown(target);
         setError(null);
       }
     } catch (e) {
@@ -87,14 +102,14 @@ function PastProblems({ user, loggedIn, current, onSelect, marks, onRetry }: Pro
 
   // 開いたとき・種類を替えたとき・ID を変えたとき・ログインの状態が変わったとき（「解き直し」は RetryList が読む）
   useEffect(() => {
-    if (category !== "retry") {
-      void read(category, false);
+    if (target !== "retry") {
+      void read(target, false);
     }
-  }, [category, user, loggedIn]);
+  }, [target, user, loggedIn]);
 
   const tabs = (
     <div className="past-categories" role="tablist" aria-label="コンテストの種類">
-      {[...CATEGORIES, { id: "retry" as const, label: "解き直し" }].map(({ id, label }) => (
+      {[...CATEGORIES, { id: "joi" as const, label: "JOI" }, { id: "retry" as const, label: "解き直し" }].map(({ id, label }) => (
         <button
           key={id}
           type="button"
@@ -108,13 +123,15 @@ function PastProblems({ user, loggedIn, current, onSelect, marks, onRetry }: Pro
       ))}
     </div>
   );
-  if (category === "retry") {
+  if (target === "retry") {
     return (
       <RetryList tabs={tabs} user={user} loggedIn={loggedIn} current={current} onSelect={onSelect} marks={marks} onRetry={onRetry} />
     );
   }
 
   const table = view?.table ?? null;
+  // 出している表が JOI のものか（読み終えるまでは前の表が残るので、選択ではなく出している表で決める）
+  const joiTable = shown !== null && JOI_KINDS.some(({ id }) => id === shown);
   // 今の表の解説 AC の数（D-257）
   const editorialCount = table
     ? table.rows
@@ -125,7 +142,7 @@ function PastProblems({ user, loggedIn, current, onSelect, marks, onRetry }: Pro
     <div className="past-problems">
       <div className="past-head">
         {tabs}
-        <button type="button" className="contest-refresh" disabled={loading} onClick={() => void read(category, true)}>
+        <button type="button" className="contest-refresh" disabled={loading} onClick={() => void read(target, true)}>
           更新
         </button>
         <span className="past-meta">
@@ -138,6 +155,22 @@ function PastProblems({ user, loggedIn, current, onSelect, marks, onRetry }: Pro
                 : ""}
         </span>
       </div>
+      {joi && (
+        <div className="past-categories past-subkinds" role="tablist" aria-label="JOI の種類">
+          {JOI_KINDS.filter(({ id }) => id !== "joi-other" || view?.joiOther || joiKind === id).map(({ id, label }) => (
+            <button
+              key={id}
+              type="button"
+              role="tab"
+              aria-selected={joiKind === id}
+              className={`past-category ${joiKind === id ? "selected" : ""}`}
+              onClick={() => onJoiKind(id)}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      )}
       {error && (
         <p className="contest-error" role="alert">
           {error}
@@ -155,7 +188,9 @@ function PastProblems({ user, loggedIn, current, onSelect, marks, onRetry }: Pro
               <tr>
                 <th>コンテスト</th>
                 {table.columns.map((column) => (
-                  <th key={column}>{column}</th>
+                  <th key={column} title={joiTable ? `${column} 問目` : undefined}>
+                    {column}
+                  </th>
                 ))}
               </tr>
             </thead>
@@ -188,10 +223,12 @@ function PastProblems({ user, loggedIn, current, onSelect, marks, onRetry }: Pro
                       >
                         <button
                           type="button"
-                          title={`${cell.problem}\n${hint}${solvedLine ? `\n${solvedLine}` : ""}`}
+                          title={`${cell.problem}${joiTable ? `\n記号：${cell.index}` : ""}\n${hint}${solvedLine ? `\n${solvedLine}` : ""}`}
                           onClick={() => onSelect({ contest: row.contest, task: cell.problem })}
                         >
-                          {cell.difficulty ? (
+                          {joiTable && !cell.difficulty ? (
+                            <span className="past-index">{cell.index}</span>
+                          ) : cell.difficulty ? (
                             <span className={ratingClass(cell.difficulty.value)}>
                               {cell.difficulty.value}
                               {cell.difficulty.experimental ? "?" : ""}
