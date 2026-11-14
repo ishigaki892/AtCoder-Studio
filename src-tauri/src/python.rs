@@ -115,14 +115,32 @@ impl Interpreter {
 }
 
 // settings.json の python の欄（D-221）。パスが空なら探す
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PythonSettings {
     pub interpreter: Interpreter,
     pub cpython: String,
     pub pypy: String,
+    // ⌘S で、保存の前に ruff で整形するか（Phase 41。D-265。既定はオン）
+    #[serde(rename = "formatOnSave")]
+    pub format_on_save: bool,
+    // ruff の絶対パス（空なら探す。D-265）
+    pub ruff: String,
     // 自作のライブラリのフォルダ（アプリのフォルダの libraries/python/。あれば IDE が入れる。D-252）
     #[serde(skip)]
     pub library: Option<PathBuf>,
+}
+
+impl Default for PythonSettings {
+    fn default() -> Self {
+        PythonSettings {
+            interpreter: Interpreter::default(),
+            cpython: String::new(),
+            pypy: String::new(),
+            format_on_save: true,
+            ruff: String::new(),
+            library: None,
+        }
+    }
 }
 
 impl PythonSettings {
@@ -187,7 +205,11 @@ pub fn find_interpreter(settings: &PythonSettings) -> Result<PathBuf, String> {
     })
 }
 
-fn find_in(names: &[&str], path_var: Option<&OsStr>, brews: &[PathBuf]) -> Option<PathBuf> {
+pub(crate) fn find_in(
+    names: &[&str],
+    path_var: Option<&OsStr>,
+    brews: &[PathBuf],
+) -> Option<PathBuf> {
     names.iter().find_map(|name| {
         let in_path = || {
             path_var.and_then(|paths| {

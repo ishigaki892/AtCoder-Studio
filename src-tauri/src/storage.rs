@@ -128,6 +128,8 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
         binding("showDebug", "d", (true, false, true)),
         // ⇧⌘C サイドバーの「コンテスト」（2026-11-02、ユーザーの選択。D-245）
         binding("showContest", "c", (true, false, true)),
+        // ⇧⌘M サイドバーの「メモ」（Phase 39。D-263）
+        binding("showMemo", "m", (true, false, true)),
     ]
 }
 
@@ -315,6 +317,8 @@ pub struct ProblemSettings {
     pub fill_input: bool,
     // 問題・コンテストを作るときの言語（Phase 16 作業 3。D-208）
     pub language: Language,
+    // 問題文の欄に、問題ごとの経過時間を出して数える（Phase 42。D-266。既定はオン）
+    pub timer: bool,
 }
 
 // 見出しの行に出せるボタンの名前（input! を作る・サンプルを保存・再取得・公式ページ・解説〔Phase 25。D-244〕・この問題を作る・
@@ -337,6 +341,7 @@ impl Default for ProblemSettings {
             main_loop: false,
             fill_input: false,
             language: Language::Rust,
+            timer: true,
         }
     }
 }
@@ -370,6 +375,7 @@ fn parse_problem_settings(value: &Value, problems: &mut Vec<String>) -> ProblemS
     for (key, slot) in [
         ("mainLoop", &mut settings.main_loop),
         ("fillInput", &mut settings.fill_input),
+        ("timer", &mut settings.timer),
     ] {
         match section.get(key) {
             None => {}
@@ -412,7 +418,7 @@ pub fn cpp_settings(dir: &Path) -> CppSettings {
 }
 
 // settings.json の python の欄（Phase 19 作業 1。D-221）。interpreter は cpython か pypy、
-// cpython・pypy は処理系の絶対パス（空なら探す）
+// cpython・pypy は処理系の絶対パス（空なら探す）。formatOnSave は ⌘S で整形するか、ruff は ruff の絶対パス（Phase 41。D-265）
 fn parse_python_settings(value: &Value, problems: &mut Vec<String>) -> PythonSettings {
     let mut settings = PythonSettings::default();
     if let Some(section) = section(value, "python", problems) {
@@ -428,13 +434,22 @@ fn parse_python_settings(value: &Value, problems: &mut Vec<String>) -> PythonSet
         for (key, slot) in [
             ("cpython", &mut settings.cpython),
             ("pypy", &mut settings.pypy),
+            ("ruff", &mut settings.ruff),
         ] {
             match section.get(key) {
                 None => {}
                 Some(Value::String(path)) => *slot = path.trim().to_string(),
                 Some(_) => problems.push(format!(
-                    "python.{key}（処理系のパスの文字列にしてください）"
+                    "python.{key}（{}のパスの文字列にしてください）",
+                    if key == "ruff" { "ruff " } else { "処理系" }
                 )),
+            }
+        }
+        match section.get("formatOnSave") {
+            None => {}
+            Some(Value::Bool(on)) => settings.format_on_save = *on,
+            Some(_) => {
+                problems.push("python.formatOnSave（true か false にしてください）".to_string())
             }
         }
     }
@@ -874,7 +889,7 @@ pub fn settings_stamp(dir: &Path) -> Option<(SystemTime, u64)> {
 }
 
 // 設定の画面の保存（作業 6b。D-159）。今のファイルの keyBindings・colors と、editor・problem・submit・notify・atcoderProblems・standings・python の
-// 設定の画面で扱う項目だけを入れ替え、ほかの項目は残す（python は interpreter だけ。処理系のパスは残す。Phase 19 作業 3。D-221）。読めないファイル（JSON の誤り・版の違い）には書かない
+// 設定の画面で扱う項目だけを入れ替え、ほかの項目は残す（python は interpreter と formatOnSave だけ。処理系・ruff のパスは残す。Phase 19 作業 3。D-221・D-265）。読めないファイル（JSON の誤り・版の違い）には書かない
 #[allow(clippy::too_many_arguments)]
 pub fn write_settings(
     dir: &Path,
@@ -885,6 +900,7 @@ pub fn write_settings(
     atcoder_problems: &AtcoderProblemsSettings,
     problem_settings: &ProblemSettings,
     interpreter: Interpreter,
+    format_on_save: bool,
     standings: &StandingsSettings,
 ) -> Result<(), String> {
     let path = dir.join(SETTINGS_FILE);
@@ -909,6 +925,7 @@ pub fn write_settings(
         "mainLoop": problem_settings.main_loop,
         "fillInput": problem_settings.fill_input,
         "language": problem_settings.language,
+        "timer": problem_settings.timer,
     });
     // 読むときと同じ決まりで確かめる（画面が確かめたものでも、範囲の外の値・知らない名前などは書かない）
     let checked = serde_json::json!({
@@ -976,7 +993,7 @@ pub fn write_settings(
     merge_section(
         object,
         "python",
-        serde_json::json!({ "interpreter": interpreter }),
+        serde_json::json!({ "interpreter": interpreter, "formatOnSave": format_on_save }),
     );
     let bytes =
         serde_json::to_vec_pretty(&value).map_err(|_| "設定を保存できません".to_string())?;
@@ -1016,7 +1033,7 @@ pub fn write_default_settings(dir: &Path) -> Result<(), String> {
         "atcoderProblems": { "user": "" },
         "standings": { "follow": [] },
         "cpp": { "compiler": "" },
-        "python": { "interpreter": "cpython", "cpython": "", "pypy": "" },
+        "python": { "interpreter": "cpython", "cpython": "", "pypy": "", "formatOnSave": true, "ruff": "" },
     });
     let bytes =
         serde_json::to_vec_pretty(&value).map_err(|_| "設定を保存できません".to_string())?;
@@ -1468,6 +1485,7 @@ mod tests {
             &AtcoderProblemsSettings::default(),
             &ProblemSettings::default(),
             Interpreter::Cpython,
+            true,
             &StandingsSettings::default(),
         )
         .unwrap();
@@ -1505,6 +1523,7 @@ mod tests {
                 &AtcoderProblemsSettings::default(),
                 &ProblemSettings::default(),
                 Interpreter::Cpython,
+                true,
                 &StandingsSettings::default(),
             )
             .is_err()
@@ -1522,6 +1541,7 @@ mod tests {
                 &AtcoderProblemsSettings::default(),
                 &ProblemSettings::default(),
                 Interpreter::Cpython,
+                true,
                 &StandingsSettings::default(),
             )
             .is_err()
@@ -1538,6 +1558,7 @@ mod tests {
             &AtcoderProblemsSettings::default(),
             &ProblemSettings::default(),
             Interpreter::Cpython,
+            true,
             &StandingsSettings::default(),
         )
         .unwrap();
@@ -1590,6 +1611,7 @@ mod tests {
             &AtcoderProblemsSettings::default(),
             &ProblemSettings::default(),
             Interpreter::Cpython,
+            true,
             &StandingsSettings::default(),
         )
         .unwrap();
@@ -1628,6 +1650,7 @@ mod tests {
                 },
                 &ProblemSettings::default(),
                 Interpreter::Cpython,
+                true,
                 &StandingsSettings::default(),
             )
         };
@@ -1682,6 +1705,7 @@ mod tests {
                 &AtcoderProblemsSettings::default(),
                 &ProblemSettings::default(),
                 Interpreter::Cpython,
+                true,
                 &StandingsSettings {
                     follow: follow.iter().map(|user| user.to_string()).collect(),
                 },
@@ -1742,6 +1766,21 @@ mod tests {
                 "python.cpython（処理系のパスの文字列にしてください）"
             ]
         );
+        // ⌘S で整形するか・ruff のパス（Phase 41。D-265）。既定は整形する
+        assert!(PythonSettings::default().format_on_save);
+        let format =
+            read(r#"{"version": 1, "python": {"formatOnSave": false, "ruff": " /opt/x/ruff "}}"#);
+        assert!(!format.python.format_on_save);
+        assert_eq!(format.python.ruff, "/opt/x/ruff");
+        let wrong = read(r#"{"version": 1, "python": {"formatOnSave": "no", "ruff": 1}}"#);
+        assert!(wrong.python.format_on_save);
+        assert_eq!(
+            wrong.appearance_problems,
+            [
+                "python.ruff（ruff のパスの文字列にしてください）",
+                "python.formatOnSave（true か false にしてください）"
+            ]
+        );
     }
 
     // 設定の画面は処理系だけを書く。処理系のパスなど、ほかの項目は残す（Phase 19 作業 3。D-221）
@@ -1764,6 +1803,7 @@ mod tests {
                 &AtcoderProblemsSettings::default(),
                 &ProblemSettings::default(),
                 interpreter,
+                true,
                 &StandingsSettings::default(),
             )
             .unwrap()
@@ -1776,6 +1816,28 @@ mod tests {
         assert!(text.contains(r#""other": 1"#));
         write(Interpreter::Cpython);
         assert_eq!(python_settings(&dir.0).interpreter, Interpreter::Cpython);
+        // ⌘S で整形するか（D-265）も書く。ruff のパスは残す
+        fs::write(
+            dir.0.join(SETTINGS_FILE),
+            r#"{"version": 1, "python": {"interpreter": "cpython", "ruff": "/opt/x/ruff"}}"#,
+        )
+        .unwrap();
+        write_settings(
+            &dir.0,
+            &[],
+            &Appearance::default(),
+            &SubmitSettings::default(),
+            &NotifySettings::default(),
+            &AtcoderProblemsSettings::default(),
+            &ProblemSettings::default(),
+            Interpreter::Cpython,
+            false,
+            &StandingsSettings::default(),
+        )
+        .unwrap();
+        let settings = python_settings(&dir.0);
+        assert!(!settings.format_on_save);
+        assert_eq!(settings.ruff, "/opt/x/ruff");
         // 初めての起動で作る settings.json にも書く
         write_default_settings(&dir.0).unwrap();
         let text = fs::read_to_string(dir.0.join(SETTINGS_FILE)).unwrap();
@@ -1819,7 +1881,7 @@ mod tests {
         // 知らない名前・重なりは使わず、知らない名前は知らせる。並びは書いた順のまま読む
         fs::write(
             dir.0.join(SETTINGS_FILE),
-            r#"{"version": 1, "problem": {"fontSize": 15, "buttons": ["refresh", "nope", "refresh", "openPage"], "mainLoop": true, "fillInput": true, "language": "cpp"}}"#,
+            r#"{"version": 1, "problem": {"fontSize": 15, "buttons": ["refresh", "nope", "refresh", "openPage"], "mainLoop": true, "fillInput": true, "language": "cpp", "timer": false}}"#,
         )
         .unwrap();
         let loaded = load();
@@ -1830,6 +1892,7 @@ mod tests {
                 main_loop: true,
                 fill_input: true,
                 language: Language::Cpp,
+                timer: false,
             }
         );
         assert_eq!(loaded.appearance.problem_font_size, 15);
@@ -1866,6 +1929,7 @@ mod tests {
             main_loop: true,
             fill_input: true,
             language: Language::Cpp,
+            timer: false,
         };
         write_settings(
             &dir.0,
@@ -1876,6 +1940,7 @@ mod tests {
             &AtcoderProblemsSettings::default(),
             &problem,
             Interpreter::Cpython,
+            true,
             &StandingsSettings::default(),
         )
         .unwrap();
@@ -1900,6 +1965,7 @@ mod tests {
                 &AtcoderProblemsSettings::default(),
                 &bad,
                 Interpreter::Cpython,
+                true,
                 &StandingsSettings::default(),
             )
             .is_err()
@@ -1981,6 +2047,7 @@ mod tests {
                 &AtcoderProblemsSettings::default(),
                 &ProblemSettings::default(),
                 Interpreter::Cpython,
+                true,
                 &StandingsSettings::default(),
             )
         };

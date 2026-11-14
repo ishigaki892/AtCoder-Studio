@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-virtual-state"
+description = "Enables the virtual_state command without any pre-configured scope."
+commands.allow = ["virtual_state"]
+
+[[permission]]
+identifier = "deny-virtual-state"
+description = "Denies the virtual_state command without any pre-configured scope."
+commands.deny = ["virtual_state"]

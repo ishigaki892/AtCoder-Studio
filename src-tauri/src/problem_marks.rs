@@ -3,6 +3,7 @@
 // 問題 ID ごとに「自力」「解説」と「解き直す」を手で付け、アプリのフォルダの problem-marks.json に保存する。
 // 形：{ "version": 1, "problems": { "abc001_1": { "solved": "editorial", "solvedOn": "2026-11-13", "retry": "2026-11-12" } } }。
 // retry は印を付けた日、solvedOn は「自力」「解説」を付けた日（Phase 37。D-261。前の版の記録にはない）。
+// memo は問題ごとのメモ、memoOn はメモを最後に書いた日（Phase 39。D-263）。
 // 書き方・権限・読めないときの退避は、ほかの作業データと同じ（D-034〜D-041。storage.rs の load_json・write_atomic）。
 // AtCoder・AtCoder Problems には何も送らない
 
@@ -43,11 +44,20 @@ pub struct Mark {
     // 解き直しの印を付けた日（手元の日付。例 "2026-11-12"。D-258）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry: Option<String>,
+    // 問題ごとのメモ（ただの文字。MEMO_LIMIT 文字まで。空なら持たない。D-263）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memo: Option<String>,
+    // メモを最後に書いた日（手元の日付。メモの一覧の並べ方に使う）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memo_on: Option<String>,
 }
+
+// メモの長さの上限（文字の数）
+pub const MEMO_LIMIT: usize = 10_000;
 
 impl Mark {
     fn is_empty(&self) -> bool {
-        self.solved.is_none() && self.retry.is_none()
+        self.solved.is_none() && self.retry.is_none() && self.memo.is_none()
     }
 }
 
@@ -106,6 +116,12 @@ fn parse(value: Value) -> Option<Marks> {
                 mark.solved_on = mark
                     .solved_on
                     .filter(|date| mark.solved.is_some() && valid_date(date));
+                mark.memo = mark
+                    .memo
+                    .filter(|memo| !memo.trim().is_empty() && memo.chars().count() <= MEMO_LIMIT);
+                mark.memo_on = mark
+                    .memo_on
+                    .filter(|date| mark.memo.is_some() && valid_date(date));
                 (id, mark)
             })
             .filter(|(id, mark)| problem::valid_id(id) && !mark.is_empty())
@@ -159,6 +175,34 @@ pub fn set_retry(
         mark.retry = match since {
             Some(date) => Some(mark.retry.take().unwrap_or(date)),
             None => None,
+        }
+    })
+}
+
+// 1 問のメモを書く（D-263）。空白だけなら消す（書いた日も消す）。変えたときは書いた日を date にする。
+// MEMO_LIMIT 文字を超えるものは保存しない
+pub fn set_memo(
+    dir: &Path,
+    id: &str,
+    memo: &str,
+    date: &str,
+) -> Result<(Marks, Option<PathBuf>), String> {
+    if !valid_date(date) {
+        return Err("日付の形が正しくありません".to_string());
+    }
+    let count = memo.chars().count();
+    if count > MEMO_LIMIT {
+        return Err(format!(
+            "メモは {MEMO_LIMIT} 文字までです（今は {count} 文字）。超えた分は保存していません"
+        ));
+    }
+    update(dir, id, |mark| {
+        if memo.trim().is_empty() {
+            mark.memo = None;
+            mark.memo_on = None;
+        } else if mark.memo.as_deref() != Some(memo) {
+            mark.memo = Some(memo.to_string());
+            mark.memo_on = Some(date.to_string());
         }
     })
 }
@@ -238,7 +282,7 @@ mod tests {
                 Mark {
                     solved: Some(SolvedBy::Myself),
                     solved_on: Some(D.to_string()),
-                    retry: None
+                    ..Mark::default()
                 }
             )]
         );
@@ -353,5 +397,60 @@ mod tests {
         assert_eq!(backup, None);
         assert_eq!(marks["abc001_1"].solved, Some(SolvedBy::Editorial));
         assert!(marks.values().all(|mark| mark.solved_on.is_none()));
+    }
+
+    #[test]
+    fn saves_memos_and_clears_empty_ones() {
+        let dir = TempDir::new("memo");
+        set_memo(&dir.0, "abc001_1", "区間の和は累積和\n2 行目", "2026-11-10").unwrap();
+        // 同じ中身をもう一度書いても、書いた日は変わらない。変えたら変わる
+        let (marks, _) =
+            set_memo(&dir.0, "abc001_1", "区間の和は累積和\n2 行目", "2026-11-12").unwrap();
+        assert_eq!(marks["abc001_1"].memo_on.as_deref(), Some("2026-11-10"));
+        let (marks, _) = set_memo(&dir.0, "abc001_1", "書き直した", "2026-11-14").unwrap();
+        assert_eq!(marks["abc001_1"].memo.as_deref(), Some("書き直した"));
+        assert_eq!(marks["abc001_1"].memo_on.as_deref(), Some("2026-11-14"));
+        let text = std::fs::read_to_string(dir.0.join(MARKS_FILE)).unwrap();
+        let value: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(value["problems"]["abc001_1"]["memo"], "書き直した");
+        assert_eq!(value["problems"]["abc001_1"]["memoOn"], "2026-11-14");
+        // ほかの記録とは別に持つ。空白だけにすると消え、ほかに記録がなければ問題ごと消える
+        set_retry(&dir.0, "abc001_1", Some("2026-11-13".to_string())).unwrap();
+        let (marks, _) = set_memo(&dir.0, "abc001_1", "  \n ", "2026-11-14").unwrap();
+        assert_eq!(
+            (
+                marks["abc001_1"].memo.as_ref(),
+                marks["abc001_1"].memo_on.as_ref()
+            ),
+            (None, None)
+        );
+        assert_eq!(marks["abc001_1"].retry.as_deref(), Some("2026-11-13"));
+        set_memo(&dir.0, "abc002_1", "x", "2026-11-14").unwrap();
+        let (marks, _) = set_memo(&dir.0, "abc002_1", "", "2026-11-14").unwrap();
+        assert!(!marks.contains_key("abc002_1"));
+        // 上限ちょうどは保存し、超えたら保存しない
+        let limit = "あ".repeat(MEMO_LIMIT);
+        assert!(set_memo(&dir.0, "abc003_1", &limit, "2026-11-14").is_ok());
+        let error = set_memo(&dir.0, "abc003_1", &format!("{limit}あ"), "2026-11-14").unwrap_err();
+        assert!(error.contains("10000"), "{error}");
+        assert_eq!(
+            load(&dir.0).unwrap().0["abc003_1"].memo.as_deref(),
+            Some(limit.as_str())
+        );
+        assert!(set_memo(&dir.0, "abc003_1", "x", "14").is_err());
+        // メモだけの記録も読める。空・長すぎるメモと、メモのない memoOn は使わない
+        std::fs::write(
+            dir.0.join(MARKS_FILE),
+            format!(
+                r#"{{"version":1,"problems":{{"abc001_1":{{"memo":"a","memoOn":"2026-11-14"}},"abc002_1":{{"memo":"  "}},"abc003_1":{{"memo":"{}"}},"abc004_1":{{"retry":"2026-11-14","memoOn":"2026-11-14"}}}}}}"#,
+                "x".repeat(MEMO_LIMIT + 1)
+            ),
+        )
+        .unwrap();
+        let (marks, backup) = load(&dir.0).unwrap();
+        assert_eq!(backup, None);
+        assert_eq!(marks.keys().collect::<Vec<_>>(), ["abc001_1", "abc004_1"]);
+        assert_eq!(marks["abc001_1"].memo_on.as_deref(), Some("2026-11-14"));
+        assert_eq!(marks["abc004_1"].memo_on, None);
     }
 }

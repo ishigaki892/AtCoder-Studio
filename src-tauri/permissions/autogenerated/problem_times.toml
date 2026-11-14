@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-problem-times"
+description = "Enables the problem_times command without any pre-configured scope."
+commands.allow = ["problem_times"]
+
+[[permission]]
+identifier = "deny-problem-times"
+description = "Denies the problem_times command without any pre-configured scope."
+commands.deny = ["problem_times"]

@@ -69,6 +69,31 @@ export function stopScaffold(): Promise<void> {
   return invoke<void>("stop_scaffold");
 }
 
+// 予約の間の知らせ（Phase 43。D-267）。start は UNIX 時間の秒。attempt は読み直しの何回目か
+export type ReserveEvent =
+  | { type: "waiting"; start: number }
+  | { type: "retrying"; attempt: number; wait: number; message: string }
+  | { type: "creating" };
+
+// 開始前のコンテストを予約する。Rust 側が開始の 1 秒後まで待ち、「コンテストを作る」と同じに作る。
+// 作り終えるまで返らない。取り消したら null。作り始めたあとの経過は onEvent で受け取る
+export function reserveContest(
+  contest: string,
+  onWait: (event: ReserveEvent) => void,
+  onEvent: (event: ScaffoldEvent) => void,
+): Promise<ContestCreated | null> {
+  const wait = new Channel<ReserveEvent>();
+  wait.onmessage = onWait;
+  const channel = new Channel<ScaffoldEvent>();
+  channel.onmessage = onEvent;
+  return invoke<ContestCreated | null>("reserve_contest", { contest, onWait: wait, onEvent: channel });
+}
+
+// 予約を取り消す（作っている途中なら止める）。予約がなければ何もしない
+export function cancelReservation(): Promise<void> {
+  return invoke<void>("cancel_reservation");
+}
+
 // 作ったパッケージで開くファイル（Rust は src/main.rs、C++ は main.cpp、Python は main.py）
 export function mainFile(result: PackageResult): string {
   return result.main;

@@ -9,6 +9,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Manager, Runtime};
 use tauri_plugin_notification::NotificationExt;
 
+use crate::scaffold::ContestCreated;
 use crate::storage::{self, NotifySettings};
 use crate::submit::{SubmissionState, SubmissionView};
 
@@ -194,6 +195,25 @@ pub fn watch_contest_start<R: Runtime>(
         }
     });
     Ok(())
+}
+
+// ---- 予約したコンテスト（Phase 43。D-267） ----
+
+// 予約したコンテストを作り終えたとき。開始の通知と同じ設定で、窓が手前にないときだけ知らせる
+pub fn contest_created<R: Runtime>(app: &AppHandle<R>, created: &ContestCreated) {
+    if !settings(app).contest_start || focused(app) {
+        return;
+    }
+    let made = created
+        .packages
+        .iter()
+        .filter(|result| result.error.is_none())
+        .count();
+    show(
+        app,
+        format!("{} の問題を作りました", created.contest),
+        format!("{} 問のうち {made} 問を作りました", created.total),
+    );
 }
 
 // ---- テスト ----

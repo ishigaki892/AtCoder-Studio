@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-reserve-contest"
+description = "Enables the reserve_contest command without any pre-configured scope."
+commands.allow = ["reserve_contest"]
+
+[[permission]]
+identifier = "deny-reserve-contest"
+description = "Denies the reserve_contest command without any pre-configured scope."
+commands.deny = ["reserve_contest"]

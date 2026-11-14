@@ -1272,6 +1272,144 @@ button.breadcrumb:focus-visible {
   white-space: nowrap;
 }
 
+/* ツールバーの右端（残り時間・予約・バーチャル参加）。まとめて右に寄せる */
+.toolbar-right {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  margin-left: auto;
+  padding-left: 12px;
+}
+
+.toolbar-right .contest-clock-wrap {
+  margin-left: 0;
+  padding-left: 0;
+}
+
+/* バーチャル参加（Phase 44。D-268） */
+.virtual-clock {
+  color: var(--fg-secondary);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.virtual-clock-ended {
+  color: var(--verdict-ng);
+  font-weight: 600;
+}
+
+.virtual-section {
+  padding: 0 12px 6px;
+  color: var(--fg-secondary);
+  font-size: 12px;
+}
+
+.virtual-section .contest-link {
+  margin: 4px 8px 4px 0;
+}
+
+.virtual-title {
+  color: var(--fg-default);
+  font-weight: 600;
+  margin-top: 4px;
+}
+
+.virtual-actions {
+  display: flex;
+  flex-wrap: wrap;
+}
+
+.virtual-tasks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 10px;
+  margin: 4px 0;
+  padding: 0;
+  list-style: none;
+  font-variant-numeric: tabular-nums;
+}
+
+.virtual-tasks li.solved {
+  color: var(--fg-default);
+}
+
+.virtual-task-label {
+  margin-right: 4px;
+  font-weight: 600;
+}
+
+.virtual-task-penalty {
+  margin-left: 2px;
+  color: var(--fg-muted);
+}
+
+.virtual-last {
+  margin-top: 6px;
+}
+
+.virtual-history {
+  margin-top: 6px;
+}
+
+.virtual-history summary {
+  cursor: pointer;
+}
+
+.virtual-history ul {
+  margin: 4px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.virtual-history li {
+  padding: 2px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.virtual-history-contest {
+  margin-right: 6px;
+  color: var(--fg-default);
+  font-weight: 600;
+}
+
+.virtual-history-date {
+  margin-right: 6px;
+}
+
+/* 予約したコンテスト（Phase 43。D-267） */
+.contest-reservation {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--fg-secondary);
+  white-space: nowrap;
+}
+
+.contest-reservation-cancel,
+.contest-creator-cancel {
+  padding: 1px 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--fg-secondary);
+  font: inherit;
+  cursor: pointer;
+}
+
+.contest-reservation-cancel:hover,
+.contest-creator-cancel:hover {
+  background: var(--bg-list-selected);
+}
+
+.contest-creator-cancel {
+  margin-left: 6px;
+}
+
+.contest-creator-reserve {
+  height: 24px;
+  margin-top: 6px;
+}
+
 /* 残り 5 分を切ったとき */
 .contest-clock-warn {
   color: var(--verdict-ng);
@@ -3108,6 +3246,176 @@ body.hide-breadcrumbs .breadcrumbs {
 
 .past-no-diff {
   color: var(--fg-muted);
+}
+
+/* サイドバーの「メモ」（Phase 39。D-263）。上はメモの欄、下はメモのある問題の一覧 */
+.memo-panel {
+  display: flex;
+  flex: 1 1 0;
+  flex-direction: column;
+  min-height: 0;
+  padding: 8px;
+  gap: 10px;
+}
+
+.memo-editor {
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.memo-title {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--fg-secondary);
+}
+
+.memo-count.over {
+  color: var(--lens-error);
+}
+
+.memo-text {
+  min-height: 12em;
+  resize: vertical;
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-base);
+  color: var(--fg-default);
+  font: inherit;
+  line-height: 1.5;
+}
+
+.memo-text:focus {
+  outline: 1px solid var(--accent-focus);
+}
+
+.memo-list {
+  display: flex;
+  flex: 1 1 0;
+  flex-direction: column;
+  min-height: 0;
+  gap: 4px;
+}
+
+.memo-list ul {
+  flex: 1 1 0;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+}
+
+.memo-list li button {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  width: 100%;
+  padding: 3px 4px;
+  border: none;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--fg-default);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.memo-list li button:hover {
+  background: var(--bg-list-selected);
+}
+
+.memo-list li.current button {
+  background: var(--bg-list-selected);
+}
+
+.memo-place {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.memo-date {
+  color: var(--fg-secondary);
+}
+
+.memo-line {
+  grid-column: 1 / -1;
+  overflow: hidden;
+  color: var(--fg-secondary);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 問題文の欄の経過時間（Phase 42。D-266）。制限の行の diff の後ろ */
+.problem-clock {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 10px;
+  gap: 2px;
+  color: var(--fg-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.problem-clock-reset {
+  padding: 0 3px;
+  border: none;
+  background: transparent;
+  color: var(--fg-muted);
+  font: inherit;
+  cursor: pointer;
+}
+
+.problem-clock-reset:hover {
+  color: var(--accent-focus);
+}
+
+/* 問題文の欄の「✎」（メモがある問題） */
+.problem-memo-mark {
+  margin-left: 6px;
+  padding: 0 4px;
+  border: none;
+  background: transparent;
+  color: var(--fg-strong);
+  font: inherit;
+  cursor: pointer;
+}
+
+.problem-memo-mark:hover {
+  color: var(--accent-focus);
+}
+
+/* 一覧のメモの列（1 行目。長ければ切る） */
+.retry-table .retry-memo {
+  max-width: 16em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 過去問の表の絞り込み（Phase 40。D-264） */
+.past-filter {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  color: var(--fg-secondary);
+}
+
+.past-filter label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.past-diff-input {
+  width: 5em;
+}
+
+/* 合わないますは薄くする（押せるまま） */
+.past-cell.past-dim {
+  opacity: 0.25;
 }
 
 /* JOI の小分けの切り替え（Phase 36。D-260）。見出しの行の下に出す */

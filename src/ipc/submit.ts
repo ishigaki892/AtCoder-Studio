@@ -1,4 +1,5 @@
 // AtCoder のログインと提出のコマンドの呼び出し（Rust 側は src-tauri/src/session.rs・submit.rs。Phase 6。D-147・D-148）
+import type { VirtualScore } from "./virtualContest";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type { ProblemId } from "./problem";
@@ -217,6 +218,8 @@ export type ContestStatus = {
   standings: StandingsOutcome;
   // 「自分の提出」のページから分かった、ログインしているユーザー
   user: string | null;
+  // このコンテストでバーチャル参加している間の、バーチャルの時間の中の結果（Phase 44。D-268。ペナルティは 5 分として）
+  virtualScore: VirtualScore | null;
 };
 
 export type StatusOutcome =

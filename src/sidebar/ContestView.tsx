@@ -17,6 +17,18 @@ import {
 import { overlaySubmissions } from "./contestStatus";
 import { ratingClass } from "../rating";
 import { difficultyHint, difficultyText, problemDifficulties, type DifficultyView } from "../ipc/atcoderProblems";
+import {
+  cancelVirtual,
+  finishVirtual,
+  scoreText,
+  startVirtual,
+  type VirtualFile,
+  type VirtualRecord,
+  type VirtualScore,
+} from "../ipc/virtualContest";
+import { formatSpan } from "../panels/ContestClock";
+import { formatElapsed } from "../panels/ProblemClock";
+import { useNowSeconds } from "../panels/VirtualClock";
 
 // 開き直したときに読み直すまでの間
 const STALE_MS = 60_000;
@@ -37,6 +49,11 @@ type Props = {
   onOpenPast: () => void;
   // 順位表を読んだ（右下の「追跡」の表にも使う。Phase 31。D-253）
   onStandings: (contest: string, standings: StandingsOutcome) => void;
+  // 提出状況を読めたとき（AC した問題を App が覚え、経過時間を止める。Phase 42。D-266）
+  onStatus: (status: ContestStatus) => void;
+  // バーチャル参加（Phase 44。D-268）。読めていなければ null
+  virtualFile: VirtualFile | null;
+  onVirtual: (file: VirtualFile) => void;
 };
 
 type Entry = {
@@ -64,6 +81,163 @@ function rankText(rank: number): string {
   return Number.isInteger(rank) ? String(rank) : rank.toFixed(1);
 }
 
+// 「2026-11-14 18:00」
+function dateText(seconds: number): string {
+  const d = new Date(seconds * 1000);
+  const two = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${two(d.getMonth() + 1)}-${two(d.getDate())} ${two(d.getHours())}:${two(d.getMinutes())}`;
+}
+
+// 「得点 600・時間 45:12（誤答 1）」
+function scoreLine(score: VirtualScore): string {
+  const penalty = score.penalty > 0 ? `（誤答 ${score.penalty}）` : "";
+  return `得点 ${scoreText(score.score)}・時間 ${formatElapsed(score.elapsed)}${penalty}`;
+}
+
+// 問題ごと：「A 3:12」「B 10:05（誤答 1）」「C —（誤答 2）」
+function TaskScores({ score }: { score: VirtualScore }) {
+  return (
+    <ul className="virtual-tasks">
+      {score.tasks.map((task) => (
+        <li key={task.task} className={task.acSeconds !== null ? "solved" : undefined}>
+          <span className="virtual-task-label">{task.label || task.task}</span>
+          <span>{task.acSeconds !== null ? formatElapsed(task.acSeconds) : "—"}</span>
+          {task.penalty > 0 && <span className="virtual-task-penalty">（誤答 {task.penalty}）</span>}
+          {task.pending && <span className="virtual-task-penalty">判定中</span>}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+// 終えたバーチャル参加の 1 行目：「得点 600・時間 45:12・123 位 / 9000 人・予想 perf 1234」
+function RecordLine({ record }: { record: VirtualRecord }) {
+  return (
+    <>
+      {scoreLine(record.result)}
+      {record.rank !== null && `・${record.rank} 位 / ${record.participants ?? "?"} 人`}
+      {record.performance !== null && (
+        <>
+          ・予想 perf{" "}
+          <span className={`contest-performance ${ratingClass(record.performance)}`} title={PERFORMANCE_HINT}>
+            {record.performance}
+          </span>
+        </>
+      )}
+    </>
+  );
+}
+
+type VirtualProps = {
+  contest: string;
+  file: VirtualFile | null;
+  // 読んだ提出状況の、バーチャルの時間の中の結果
+  live: VirtualScore | null;
+  onVirtual: (file: VirtualFile) => void;
+};
+
+// バーチャル参加の欄（Phase 44。D-268）：始める・残り時間と今の結果・やめる／結果を出す・このコンテストの前の結果・一覧
+function VirtualSection({ contest, file, live, onVirtual }: VirtualProps) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [showAll, setShowAll] = useState(false);
+  const current = file?.current ?? null;
+  const mine = current !== null && current.contest === contest;
+  const now = useNowSeconds(mine);
+
+  async function run(action: () => Promise<VirtualFile | null>) {
+    setBusy(true);
+    setError(null);
+    try {
+      const next = await action();
+      if (next) {
+        onVirtual(next);
+      }
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const results = file?.results ?? [];
+  const last = results.find((record) => record.contest === contest) ?? null;
+  const left = mine && current ? current.end - now : 0;
+  return (
+    <div className="virtual-section">
+      {mine && current ? (
+        <>
+          <div className="virtual-title">
+            バーチャル参加中：{left > 0 ? `残り ${formatSpan(left)}` : "時間が終わりました"}
+          </div>
+          {live ? (
+            <>
+              <div>{scoreLine(live)}</div>
+              <TaskScores score={live} />
+              <p className="contest-note">
+                始めてからの提出を「更新」で読み直します（ペナルティは 1 つ 5 分として計算。結果を出すときは順位表から求めます）
+              </p>
+            </>
+          ) : (
+            <p className="contest-note">提出状況を読むと（「更新」）、始めてからの AC の時刻が出ます</p>
+          )}
+          <div className="virtual-actions">
+            <button type="button" className="contest-link" disabled={busy} onClick={() => void run(finishVirtual)}>
+              {busy ? "読んでいます…" : left > 0 ? "やめて結果を出す" : "結果を出す"}
+            </button>
+            <button type="button" className="contest-link" disabled={busy} onClick={() => void run(cancelVirtual)}>
+              結果を残さずにやめる
+            </button>
+          </div>
+        </>
+      ) : current ? (
+        <p className="contest-note">{current.contest} でバーチャル参加しています（バーチャル参加は 1 つずつです）</p>
+      ) : (
+        <button
+          type="button"
+          className="contest-link"
+          disabled={busy || file === null}
+          title="終わったコンテストを、本番と同じ長さで解きます。提出はブラウザから行い、始めてからの提出で順位と予想 perf を出します"
+          onClick={() => void run(() => startVirtual(contest))}
+        >
+          このコンテストでバーチャル参加
+        </button>
+      )}
+      {error && (
+        <p className="contest-error" role="alert">
+          {error}
+        </p>
+      )}
+      {last && !mine && (
+        <div className="virtual-last">
+          <div className="virtual-title">前のバーチャル参加（{dateText(last.start)}）</div>
+          <div>
+            <RecordLine record={last} />
+          </div>
+          <TaskScores score={last.result} />
+          {last.note && <p className="contest-note">{last.note}</p>}
+        </div>
+      )}
+      {results.length > 0 && (
+        <details className="virtual-history" open={showAll} onToggle={(e) => setShowAll(e.currentTarget.open)}>
+          <summary>前のバーチャル参加（{results.length}）</summary>
+          <ul>
+            {results.map((record) => (
+              <li key={`${record.contest}-${record.start}`} title={record.note ?? undefined}>
+                <span className="virtual-history-contest">{record.contest}</span>
+                <span className="virtual-history-date">{dateText(record.start)}</span>
+                <span>
+                  <RecordLine record={record} />
+                </span>
+              </li>
+            ))}
+          </ul>
+        </details>
+      )}
+    </div>
+  );
+}
+
 // コンテストごとに覚えておく（サイドバーを切り替えても、読み直さずに出す）
 const cache = new Map<string, Entry>();
 
@@ -82,6 +256,9 @@ function ContestView({
   onLogin,
   onOpenPast,
   onStandings,
+  onStatus,
+  virtualFile,
+  onVirtual,
 }: Props) {
   const [entry, setEntry] = useState<Entry | null>(null);
   const [loading, setLoading] = useState(false);
@@ -101,6 +278,7 @@ function ContestView({
       if (outcome.kind === "read") {
         const standings = outcome.status.standings;
         onStandings(target, standings);
+        onStatus(outcome.status);
         next = {
           status: outcome.status,
           error: null,
@@ -213,6 +391,12 @@ function ContestView({
           </button>
         </div>
       )}
+      <VirtualSection
+        contest={contest}
+        file={virtualFile}
+        live={status?.virtualScore ?? null}
+        onVirtual={onVirtual}
+      />
       {standings && (
         <div className="contest-standings">
           {standings.place ? (

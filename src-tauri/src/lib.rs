@@ -18,10 +18,13 @@ mod menu;
 mod notify;
 mod problem;
 mod problem_marks;
+mod problem_times;
 mod process;
 mod py_bundle;
 mod python;
 mod random;
+mod reserve;
+mod ruff;
 mod run;
 mod rust_bundle;
 mod rust_check;
@@ -38,6 +41,7 @@ mod storage;
 mod submit;
 mod toolchain;
 mod trust;
+mod virtual_contest;
 mod workspace;
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -190,6 +194,12 @@ pub fn run() {
             commands::set_problem_retry,
             commands::retry_problems,
             commands::editorial_problems,
+            commands::set_problem_memo,
+            commands::memo_problems,
+            commands::format_python,
+            commands::problem_times,
+            commands::set_problem_time,
+            commands::reset_problem_time,
             commands::create_random_programs,
             commands::ask_restart_package,
             commands::restart_package,
@@ -212,6 +222,12 @@ pub fn run() {
             commands::create_problem_package,
             commands::create_contest_packages,
             commands::stop_scaffold,
+            commands::reserve_contest,
+            commands::cancel_reservation,
+            commands::virtual_state,
+            commands::start_virtual,
+            commands::finish_virtual,
+            commands::cancel_virtual,
             commands::problem_choice,
             commands::package_problem,
             commands::set_problem_choice,

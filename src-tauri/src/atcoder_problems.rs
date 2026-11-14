@@ -341,6 +341,14 @@ pub fn joi_kind(contest: &str) -> Option<&'static str> {
     Some("joi-other")
 }
 
+// 過去問の表のどれか（ABC・ARC・AGC・AWC・JOI）に入るコンテストか（一覧に出す場所を選ぶのに使う）
+fn is_table_contest(contest: &str) -> bool {
+    CATEGORIES
+        .iter()
+        .any(|category| category_of(contest, category))
+        || joi_kind(contest).is_some()
+}
+
 // コンテストがその表に入るか
 fn in_category(contest: &str, category: &str) -> bool {
     if JOI_KINDS.contains(&category) {
@@ -787,6 +795,8 @@ pub enum MarkList {
     Retry,
     // 「解説」を付けた問題（AC 状況は問わない。D-261）
     Editorial,
+    // メモのある問題（D-263）。入れた日は最後に書いた日
+    Memo,
 }
 
 // 解き直しの一覧（D-258）
@@ -831,6 +841,10 @@ pub fn marks_view(
                     }
                     mark.solved_on.clone()
                 }
+                MarkList::Memo => {
+                    mark.memo.as_ref()?;
+                    mark.memo_on.clone()
+                }
             };
             let mut places: Vec<Place> = problems
                 .iter()
@@ -842,6 +856,19 @@ pub fn marks_view(
                 })
                 .collect();
             places.sort_by(|a, b| a.contest.cmp(&b.contest));
+            // 出す場所は、過去問の表の種類（ABC・ARC・AGC・AWC・JOI）のコンテストだけにする。AtCoder Daily Training
+            // （adt_…）などは ABC の問題をそのまま使うので、全部を出すと何十にもなる（2026-11-14、ユーザーの指摘）。
+            // 表の種類のコンテストにない問題は、今までどおり最初の 1 つを出す
+            let main: Vec<Place> = places
+                .iter()
+                .filter(|place| is_table_contest(&place.contest))
+                .cloned()
+                .collect();
+            let places = if main.is_empty() {
+                places.into_iter().take(1).collect()
+            } else {
+                main
+            };
             let head = problem.rfind('_').map(|at| &problem[..at]);
             let contest = places
                 .iter()
@@ -1437,8 +1464,8 @@ mod tests {
         let dir = TempDir::new("retry");
         let mark = |solved: Option<SolvedBy>, retry: Option<&str>| Mark {
             solved,
-            solved_on: None,
             retry: retry.map(str::to_string),
+            ..Mark::default()
         };
         let marks: Marks = [
             (
@@ -1504,6 +1531,28 @@ mod tests {
         );
         // 押したときは、問題 ID の頭と同じコンテスト
         assert_eq!(shared.contest, "arc058");
+        // ABC の問題をそのまま使う AtCoder Daily Training の回は、場所に出さない（2026-11-14）
+        std::fs::write(
+            data.join("contest-problem.json"),
+            r#"[{"contest_id":"abc001","problem_id":"abc001_1","problem_index":"A"},
+                {"contest_id":"adt_all_20260209_1","problem_id":"abc001_1","problem_index":"A"},
+                {"contest_id":"adt_easy_20260210_2","problem_id":"abc001_1","problem_index":"B"},
+                {"contest_id":"adt_all_20260101_1","problem_id":"abc002_1","problem_index":"C"},
+                {"contest_id":"adt_all_20260102_1","problem_id":"abc002_1","problem_index":"D"}]"#,
+        )
+        .unwrap();
+        let view = retry_view(&dir.0, &marks, Some("me"));
+        let row = |id: &str| view.rows.iter().find(|row| row.problem == id).unwrap();
+        assert_eq!(
+            row("abc001_1").places,
+            [Place {
+                contest: "abc001".to_string(),
+                index: "A".to_string()
+            }]
+        );
+        // 表の種類のコンテストに入っていない問題は、最初の 1 つだけ
+        assert_eq!(row("abc002_1").places.len(), 1);
+        assert_eq!(row("abc002_1").places[0].contest, "adt_all_20260101_1");
         assert_eq!(shared.difficulty.map(|d| d.value), Some(900));
         assert_eq!(shared.solved, Some(Solved::Accepted));
         assert_eq!(shared.solved_by, Some(SolvedBy::Editorial));
@@ -1521,6 +1570,7 @@ mod tests {
             solved,
             solved_on: on.map(str::to_string),
             retry: retry.map(str::to_string),
+            ..Mark::default()
         };
         let marks: Marks = [
             // 前の版で付けた（日付のない）記録
@@ -1582,5 +1632,45 @@ mod tests {
         let view = retry_view(&dir.0, &marks, Some("me"));
         let ids: Vec<&str> = view.rows.iter().map(|row| row.problem.as_str()).collect();
         assert_eq!(ids, ["abc002_1", "abc005_1"]);
+    }
+
+    #[test]
+    fn lists_memos_by_the_day_they_were_written() {
+        use crate::problem_marks::{Mark, Marks, SolvedBy};
+        let dir = TempDir::new("memo");
+        let memo = |text: &str, on: Option<&str>| Mark {
+            memo: Some(text.to_string()),
+            memo_on: on.map(str::to_string),
+            ..Mark::default()
+        };
+        let marks: Marks = [
+            ("abc001_1".to_string(), memo("古い", Some("2026-11-10"))),
+            ("abc002_1".to_string(), memo("新しい", Some("2026-11-14"))),
+            ("abc003_1".to_string(), memo("日付なし", None)),
+            // メモのない記録は出さない
+            (
+                "abc004_1".to_string(),
+                Mark {
+                    solved: Some(SolvedBy::Editorial),
+                    ..Mark::default()
+                },
+            ),
+        ]
+        .into_iter()
+        .collect();
+        let view = marks_view(&dir.0, &marks, None, MarkList::Memo);
+        let rows: Vec<(&str, Option<&str>)> = view
+            .rows
+            .iter()
+            .map(|row| (row.problem.as_str(), row.since.as_deref()))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ("abc002_1", Some("2026-11-14")),
+                ("abc001_1", Some("2026-11-10")),
+                ("abc003_1", None),
+            ]
+        );
     }
 }

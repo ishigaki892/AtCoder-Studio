@@ -395,6 +395,112 @@ pub fn summarize(standings: &StandingsJson, user: Option<&str>, kind: Kind, star
     summary
 }
 
+// ---- バーチャル参加（Phase 44。D-268） ----
+
+// ペナルティ 1 つあたりの時間（秒）を、順位表から求める。ペナルティのある行で
+// （合計の時間 − 最後に得点を取った時刻）÷ ペナルティの数。いちばん多い値。求められなければ None
+pub fn penalty_seconds(standings: &StandingsJson) -> Option<i64> {
+    let mut counts: HashMap<i64, usize> = HashMap::new();
+    let with_penalty = standings
+        .standings_data
+        .iter()
+        .filter(|row| row.total_result.penalty > 0 && row.total_result.score > 0.0);
+    for row in with_penalty {
+        let Some(last) = row
+            .task_results
+            .values()
+            .filter(|result| result.score > 0.0)
+            .map(|result| result.elapsed)
+            .max()
+        else {
+            continue;
+        };
+        let extra = row.total_result.elapsed - last;
+        if extra <= 0 {
+            continue;
+        }
+        // ナノ秒を秒に（四捨五入）
+        let seconds = (extra / row.total_result.penalty + 500_000_000) / 1_000_000_000;
+        if seconds > 0 {
+            *counts.entry(seconds).or_default() += 1;
+        }
+    }
+    counts
+        .into_iter()
+        .max_by_key(|(seconds, count)| (*count, -*seconds))
+        .map(|(seconds, _)| seconds)
+}
+
+// 当てはめた順位と予想 perf
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VirtualPlace {
+    // 得点が多い・得点が同じで時間が短い行の数 ＋ 1
+    pub rank: i64,
+    pub participants: usize,
+    pub performance: Option<i64>,
+    // 予想 perf を出さない理由
+    pub note: Option<String>,
+}
+
+// バーチャル参加の得点（100 倍）と時間（秒。ペナルティを含む）を、当時の順位表に当てはめる。start はコンテストの
+// （本番の）開始時刻。予想 perf は、Rated の行の中に入れたときの順位（同じ得点・時間の人とは平均）で、summarize と同じ計算。
+// 終わったコンテストなので、参加する前のレートは OldRating
+pub fn virtual_place(
+    standings: &StandingsJson,
+    kind: Kind,
+    start: i64,
+    score: f64,
+    elapsed_seconds: i64,
+) -> VirtualPlace {
+    let elapsed = elapsed_seconds.saturating_mul(1_000_000_000);
+    let same = |row: &Row| {
+        (row.total_result.score - score).abs() < 1e-6 && row.total_result.elapsed == elapsed
+    };
+    let better = |row: &Row| {
+        row.total_result.score > score + 1e-6
+            || ((row.total_result.score - score).abs() < 1e-6 && row.total_result.elapsed < elapsed)
+    };
+    let rows = &standings.standings_data;
+    let mut place = VirtualPlace {
+        rank: rows.iter().filter(|row| better(row)).count() as i64 + 1,
+        participants: rows.len(),
+        performance: None,
+        note: None,
+    };
+    let range = match kind {
+        Kind::Rated(range) => range,
+        Kind::Unrated => {
+            place.note = Some("Rated のコンテストではないので、予想 perf は出しません".to_string());
+            return place;
+        }
+        Kind::Heuristic => {
+            place.note =
+                Some("AHC（ヒューリスティック）なので、予想 perf は出しません".to_string());
+            return place;
+        }
+    };
+    let rated: Vec<&Row> = rows.iter().filter(|row| row.is_rated).collect();
+    if rated.is_empty() {
+        place.note =
+            Some("順位表に Rated の参加者がいないので、予想 perf は出しません".to_string());
+        return place;
+    }
+    let ahead = rated.iter().filter(|row| better(row)).count() as f64;
+    let ties = rated.iter().filter(|row| same(row)).count() as f64;
+    let default = default_aperf(range, start);
+    let aperfs: Vec<f64> = rated
+        .iter()
+        .map(|row| inner_rating(row.old_rating, row.competitions).unwrap_or(default))
+        .collect();
+    let mut x = raw_performance(&aperfs, ahead + 1.0 + ties / 2.0);
+    if let Some(cap) = performance_cap(range) {
+        x = x.min(cap);
+    }
+    place.performance = Some(positivize(x).round() as i64);
+    place
+}
+
 // 1 問の予想 diff（D-232）。満点で AC の人を「解けた」とする
 fn difficulty_of(rows: &[Row], task: &str, before: &dyn Fn(&Row) -> i64) -> Option<i64> {
     let score = |row: &Row| {
@@ -879,6 +985,70 @@ mod tests {
         let few = standings(false, &["x_c"], &rows[..30]);
         let summary = summarize(&few, Some("me"), Kind::Rated(ABC), 1_800_000_000);
         assert_eq!(summary.difficulties[0].difficulty, None);
+    }
+
+    // 得点（100 倍）・時間（秒）・ペナルティ・最後に得点を取った時刻（秒）を持つ行（バーチャル参加の当てはめ用）
+    fn timed_row(
+        name: &str,
+        rated: bool,
+        score: f64,
+        elapsed: i64,
+        penalty: i64,
+        last: i64,
+    ) -> String {
+        let ns = 1_000_000_000i64;
+        format!(
+            "{{\"Rank\":1,\"UserScreenName\":\"{name}\",\"IsRated\":{rated},\"Rating\":3000,\"OldRating\":1000,\"Competitions\":10,\"TaskResults\":{{\"x_a\":{{\"Score\":{score},\"Status\":1,\"Elapsed\":{}}}}},\"TotalResult\":{{\"Count\":1,\"Score\":{score},\"Elapsed\":{},\"Penalty\":{penalty}}}}}",
+            last * ns,
+            elapsed * ns
+        )
+    }
+
+    #[test]
+    fn places_a_virtual_result_in_the_old_standings() {
+        // 600 点の 3 人（時間 1000・2000・2000 秒）、300 点の 2 人、0 点の 1 人（Unrated）
+        let rows = [
+            timed_row("a", true, 60000.0, 1000, 0, 1000),
+            timed_row("b", true, 60000.0, 2000, 1, 1700),
+            timed_row("c", true, 60000.0, 2000, 2, 1400),
+            timed_row("d", true, 30000.0, 500, 0, 500),
+            timed_row("e", true, 30000.0, 900, 0, 900),
+            timed_row("f", false, 0.0, 0, 0, 0),
+        ];
+        let data = standings(true, &["x_a"], &rows);
+        // ペナルティ 1 つあたり 300 秒（b：2000−1700、c：(2000−1400)/2）
+        assert_eq!(penalty_seconds(&data), Some(300));
+        assert_eq!(
+            penalty_seconds(&standings(true, &["x_a"], &rows[..1])),
+            None
+        );
+        // 600 点・2000 秒：a だけが上。b・c と同じ
+        let place = virtual_place(&data, Kind::Rated(ABC), 1_700_000_000, 60000.0, 2000);
+        assert_eq!((place.rank, place.participants), (2, 6));
+        // 予想 perf は、Rated の中で 2 位（a の次）＋ 同じ 2 人との平均で 3 位。参加する前のレート（OldRating）を使う
+        let same_old = virtual_place(&data, Kind::Rated(ABC), 1_700_000_000, 60000.0, 2000);
+        let expected = {
+            let aperf = inner_rating(1000, 10).unwrap();
+            positivize(raw_performance(&[aperf; 5], 3.0).min(2400.0)).round() as i64
+        };
+        assert_eq!(same_old.performance, Some(expected));
+        assert_eq!(place.note, None);
+        // 300 点・600 秒：d の次
+        assert_eq!(
+            virtual_place(&data, Kind::Rated(ABC), 1_700_000_000, 30000.0, 600).rank,
+            5
+        );
+        // 誰より上
+        assert_eq!(
+            virtual_place(&data, Kind::Rated(ABC), 1_700_000_000, 90000.0, 9000).rank,
+            1
+        );
+        // Rated でない・AHC は順位だけ
+        for kind in [Kind::Unrated, Kind::Heuristic] {
+            let other = virtual_place(&data, kind, 1_700_000_000, 30000.0, 600);
+            assert_eq!((other.rank, other.performance), (5, None));
+            assert!(other.note.is_some());
+        }
     }
 
     #[test]

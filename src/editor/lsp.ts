@@ -12,7 +12,7 @@
 //   新しいサーバーの知らせと取り違えない
 // - 状態・ログ・失敗は開発者ツールの console に出し、あわせて画面（下部パネルの状態の文字と実行ログ）に知らせる
 //   （Phase 3b-2 作業 3。D-130）。画面への知らせは subscribeLsp で受ける
-import { Channel } from "@tauri-apps/api/core";
+import { Channel, invoke } from "@tauri-apps/api/core";
 import { getIndentUnit } from "@codemirror/language";
 import { Compartment, Text, type EditorState } from "@codemirror/state";
 import type { EditorView } from "@codemirror/view";
@@ -36,6 +36,7 @@ import { IdeWorkspace } from "./workspace";
 import { inlayHints, QUIESCENT_EVENT } from "./inlayHints";
 import { sanitizeDocHTML } from "./sanitize";
 import { isCppPath, isPythonPath } from "./language";
+import { isAppKey, isReadOnlyKey } from "./readOnlyKey";
 import { toOutline, type OutlineNode } from "./breadcrumbTrail";
 
 // 開いているファイルを言語サーバーにつないだ合図。パンくずリストが記号を聞き直す（Phase 18 作業 2。D-216）
@@ -555,10 +556,10 @@ export async function documentSymbols(key: string): Promise<{ doc: Text; symbols
 // clangd は clang-format の書き方で整形する（.clang-format があればそれ。C++ のコンテストのフォルダには IDE が置く。D-210）。
 // 返ってきた変更は userEvent "format" で適用されるので、⌘Z で戻せ、自動保存の対象になる（ライブラリの動作）。
 // 開いている .rs が LSP につながっていなければ（読み取り専用のタブ、信頼していないフォルダを含む）何もしない。
-// .py は basedpyright が整形しないので、送らずに知らせる（D-225）
+// .py は basedpyright が整形しないので、言語サーバーには送らず、ruff で整形する（Phase 41。D-265。D-225 を置き換え）
 export function formatActiveDocument() {
-  if (shownKey !== null && isPythonPath(shownKey)) {
-    logLine("Python のファイルの整形には対応していません");
+  if (lastView && shownKey !== null && isPythonPath(shownKey)) {
+    void formatPython(lastView, shownKey, false);
     return;
   }
   if (lastView) {
@@ -581,6 +582,68 @@ function isTextEdit(value: unknown): value is TextEdit {
   return typeof edit?.newText === "string" && isPosition(edit.range?.start) && isPosition(edit.range?.end);
 }
 
+// ⌘S で ruff で整形するか（設定の「Python」の「⌘S で整形する」。D-265）。App が設定を読んだときに入れる
+let pythonFormatOnSave = true;
+export function setPythonFormatOnSave(on: boolean) {
+  pythonFormatOnSave = on;
+}
+// ⌘S のたびに「ruff が見つかりません」を出さないように、アプリを開いている間に 1 回だけ知らせる
+let ruffMissingNoted = false;
+
+// .py を ruff で整形する（Phase 41。D-265）。Rust 側（ruff.rs）が ruff を動かし、整形したソースを返す。
+// 変わったところだけを userEvent "format" で置き換える（⌘Z で戻せ、自動保存の対象になる）。
+// 待つ間にタブを切り替えた・編集したときは置き換えない。読み取り専用のタブ・アプリのフォルダのファイルは整形しない。
+// onSave（⌘S）のときは、信頼していない作業領域では何も言わず、ruff がないことはアプリを開いている間に 1 回だけ知らせる
+async function formatPython(view: EditorView, path: string, onSave: boolean): Promise<void> {
+  if (isReadOnlyKey(path) || isAppKey(path)) {
+    if (!onSave) {
+      logLine("このタブは整形しません（読み取り専用・アプリのフォルダのファイル）");
+    }
+    return;
+  }
+  const doc = view.state.doc;
+  const old = doc.toString();
+  let formatted: string;
+  try {
+    formatted = await invoke<string>("format_python", { path, text: old });
+  } catch (e) {
+    const message = String(e);
+    if (onSave) {
+      if (message.includes("信頼されていない")) {
+        return;
+      }
+      if (message.includes("ruff が見つかりません")) {
+        if (ruffMissingNoted) {
+          return;
+        }
+        ruffMissingNoted = true;
+      }
+      logLine(`整形できなかったので、整形せずに保存します：${message}`);
+    } else {
+      logLine(message);
+    }
+    return;
+  }
+  if (shownKey !== path || view.state.doc !== doc || formatted === old) {
+    return;
+  }
+  // 変わったところ（頭と終わりの同じ部分を除いたところ）だけを置き換える（カーソルが大きく動かないように）
+  let start = 0;
+  while (start < old.length && start < formatted.length && old[start] === formatted[start]) {
+    start++;
+  }
+  let endOld = old.length;
+  let endNew = formatted.length;
+  while (endOld > start && endNew > start && old[endOld - 1] === formatted[endNew - 1]) {
+    endOld--;
+    endNew--;
+  }
+  view.dispatch({
+    changes: { from: start, to: endOld, insert: formatted.slice(start, endNew) },
+    userEvent: "format",
+  });
+}
+
 // ⌘S で、保存の前に整形する（D-135）。path は保存するタブ（開いているタブ）。
 // rust-analyzer が使え（読み込みが一度終わっている）、整形の変更が返り、その間に文書が変わらなかったときだけ、
 // 変更を適用する（userEvent "format"。⌘Z で戻せる）。それ以外（LSP につながっていない、読み込み前、読み取り専用のタブ、
@@ -588,12 +651,15 @@ function isTextEdit(value: unknown): value is TextEdit {
 // 失敗の理由は実行ログに出す
 export async function formatBeforeSave(path: string | null): Promise<void> {
   const view = lastView;
-  const plugin = view && LSPPlugin.get(view);
-  if (!view || !plugin || path === null || shownKey !== path || !current?.ready || current.closed) {
+  // .py は言語サーバーを使わず ruff で整形する（D-265。basedpyright が動いていなくても整形する）
+  if (view && path !== null && shownKey === path && isPythonPath(path)) {
+    if (pythonFormatOnSave) {
+      await formatPython(view, path, true);
+    }
     return;
   }
-  // basedpyright は整形しない（D-225）。整形せずに保存する
-  if (isPythonPath(path)) {
+  const plugin = view && LSPPlugin.get(view);
+  if (!view || !plugin || path === null || shownKey !== path || !current?.ready || current.closed) {
     return;
   }
   const doc = view.state.doc;

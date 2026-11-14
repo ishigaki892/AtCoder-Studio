@@ -1361,6 +1361,305 @@ pub async fn retry_problems(app: AppHandle) -> Result<crate::atcoder_problems::R
     .map_err(|_| "解き直しの一覧を読めません".to_string())?
 }
 
+// 経過時間（Phase 42。D-266）のファイルを読めなかったときの知らせ
+fn notify_broken_times(app: &AppHandle, backup: Option<PathBuf>) {
+    if let Some(backup) = backup {
+        app.dialog()
+            .message(format!(
+                "問題ごとの経過時間を読めなかったので、別の名前で退避し、0 から数えます。\n退避先：\n{}",
+                backup.to_string_lossy()
+            ))
+            .title("経過時間")
+            .kind(MessageDialogKind::Warning)
+            .blocking_show();
+    }
+}
+
+// 問題ごとの経過時間をすべて返す（Phase 42。D-266）。キーは問題 ID
+#[tauri::command]
+pub async fn problem_times(app: AppHandle) -> Result<crate::problem_times::Times, String> {
+    let dir = app_dir(&app)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let (times, backup) = crate::problem_times::load(&dir)?;
+        notify_broken_times(&app, backup);
+        Ok(times)
+    })
+    .await
+    .map_err(|_| "経過時間を読めません".to_string())?
+}
+
+// 1 問の経過時間を書く（数えるのは画面側。0 秒で AC もなければ消す）
+#[tauri::command]
+pub async fn set_problem_time(
+    id: String,
+    time: crate::problem_times::ProblemTime,
+    app: AppHandle,
+) -> Result<(), String> {
+    ensure_primary(&app)?;
+    let dir = app_dir(&app)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let (_, backup) = crate::problem_times::set(&dir, &id, time)?;
+        notify_broken_times(&app, backup);
+        Ok(())
+    })
+    .await
+    .map_err(|_| "経過時間を保存できません".to_string())?
+}
+
+// 「⟲」：確かめてから、1 問の経過時間を 0 に戻す（Phase 42。D-266）。戻したら true
+#[tauri::command]
+pub async fn reset_problem_time(id: String, app: AppHandle) -> Result<bool, String> {
+    ensure_primary(&app)?;
+    let dir = app_dir(&app)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let confirmed = app
+            .dialog()
+            .message(format!("{id} の経過時間を 0 に戻して、数え直しますか？"))
+            .title("経過時間")
+            .kind(MessageDialogKind::Info)
+            .buttons(MessageDialogButtons::OkCancelCustom(
+                "数え直す".to_string(),
+                "やめる".to_string(),
+            ))
+            .blocking_show();
+        if !confirmed {
+            return Ok(false);
+        }
+        let (_, backup) = crate::problem_times::set(&dir, &id, Default::default())?;
+        notify_broken_times(&app, backup);
+        Ok(true)
+    })
+    .await
+    .map_err(|_| "経過時間を戻せません".to_string())?
+}
+
+// ---- バーチャル参加（Phase 44。D-268） ----
+
+fn notify_broken_virtual(app: &AppHandle, backup: Option<PathBuf>) {
+    if let Some(backup) = backup {
+        app.dialog()
+            .message(format!(
+                "バーチャル参加の記録を読めなかったので、別の名前で退避し、空から始めます。\n退避先：\n{}",
+                backup.to_string_lossy()
+            ))
+            .title("バーチャル参加")
+            .kind(MessageDialogKind::Warning)
+            .blocking_show();
+    }
+}
+
+fn now_unix_secs() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+// 今のバーチャル参加と、終えた結果
+#[tauri::command]
+pub async fn virtual_state(app: AppHandle) -> Result<crate::virtual_contest::VirtualFile, String> {
+    let dir = app_dir(&app)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let (file, backup) = crate::virtual_contest::load(&dir)?;
+        notify_broken_virtual(&app, backup);
+        Ok(file)
+    })
+    .await
+    .map_err(|_| "バーチャル参加を読めません".to_string())?
+}
+
+// バーチャル参加を始める。開催期間（トップページ。覚えてあれば読まない）から本番の長さを決め、確かめてから、
+// 「始める」を押した時刻を開始にする。終わったコンテストだけ。始めなければ null
+#[tauri::command]
+pub async fn start_virtual(
+    contest: String,
+    app: AppHandle,
+) -> Result<Option<crate::virtual_contest::VirtualFile>, String> {
+    ensure_primary(&app)?;
+    let dir = app_dir(&app)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        ProblemId::new(&contest, "x")?;
+        let period = submit::contest_period(&submit::Remote::app(), &contest, false)?;
+        if now_unix_secs() < period.end {
+            return Err(format!(
+                "{contest} はまだ終わっていません。バーチャル参加できるのは、終わったコンテストだけです"
+            ));
+        }
+        let length = period.end - period.start;
+        if let Some(running) = crate::virtual_contest::load(&dir)?.0.current {
+            return Err(format!(
+                "{} でバーチャル参加しています。バーチャル参加は 1 つずつです",
+                running.contest
+            ));
+        }
+        let confirmed = app
+            .dialog()
+            .message(format!(
+                "{contest} のバーチャル参加を始めますか？\n\n時間は本番と同じ {} 分です。「始める」を押した時刻から数えます。\n提出は、今までどおりブラウザから行います（「コードをコピーして公式の提出ページを開く」）。時間の中の提出から、AC の時刻を拾います",
+                length / 60
+            ))
+            .title("バーチャル参加")
+            .kind(MessageDialogKind::Info)
+            .buttons(MessageDialogButtons::OkCancelCustom(
+                "始める".to_string(),
+                "やめる".to_string(),
+            ))
+            .blocking_show();
+        if !confirmed {
+            return Ok(None);
+        }
+        let start = now_unix_secs();
+        let (file, backup) = crate::virtual_contest::start(
+            &dir,
+            crate::virtual_contest::Current {
+                contest,
+                start,
+                end: start + length,
+            },
+        )?;
+        notify_broken_virtual(&app, backup);
+        Ok(Some(file))
+    })
+    .await
+    .map_err(|_| "バーチャル参加を始められません".to_string())?
+}
+
+// バーチャル参加を終えて結果を出す。時間が残っていれば、確かめてから（やめた時刻までの提出で）出す。
+// 「自分の提出」と順位表を読む。読めなければ、バーチャル参加はそのまま（もう一度押せる）。終えなければ null
+#[tauri::command]
+pub async fn finish_virtual(
+    app: AppHandle,
+) -> Result<Option<crate::virtual_contest::VirtualFile>, String> {
+    ensure_primary(&app)?;
+    let dir = app_dir(&app)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let Some(current) = crate::virtual_contest::load(&dir)?.0.current else {
+            return Err("バーチャル参加していません".to_string());
+        };
+        let now = now_unix_secs();
+        if now < current.end {
+            let confirmed = app
+                .dialog()
+                .message(format!(
+                    "{} のバーチャル参加の時間は、まだ {} 分残っています。ここでやめて、結果を出しますか？",
+                    current.contest,
+                    (current.end - now + 59) / 60
+                ))
+                .title("バーチャル参加")
+                .kind(MessageDialogKind::Info)
+                .buttons(MessageDialogButtons::OkCancelCustom(
+                    "やめて結果を出す".to_string(),
+                    "続ける".to_string(),
+                ))
+                .blocking_show();
+            if !confirmed {
+                return Ok(None);
+            }
+        }
+        let record = submit::virtual_result(&submit::Remote::app(), &dir, &current, now)?;
+        let (file, backup) = crate::virtual_contest::finish(&dir, record)?;
+        notify_broken_virtual(&app, backup);
+        Ok(Some(file))
+    })
+    .await
+    .map_err(|_| "バーチャル参加の結果を出せません".to_string())?
+}
+
+// バーチャル参加を、結果を残さずにやめる（確かめてから）。やめなければ null
+#[tauri::command]
+pub async fn cancel_virtual(
+    app: AppHandle,
+) -> Result<Option<crate::virtual_contest::VirtualFile>, String> {
+    ensure_primary(&app)?;
+    let dir = app_dir(&app)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let Some(current) = crate::virtual_contest::load(&dir)?.0.current else {
+            return Ok(None);
+        };
+        let confirmed = app
+            .dialog()
+            .message(format!(
+                "{} のバーチャル参加を、結果を残さずにやめますか？",
+                current.contest
+            ))
+            .title("バーチャル参加")
+            .kind(MessageDialogKind::Warning)
+            .buttons(MessageDialogButtons::OkCancelCustom(
+                "結果を残さずにやめる".to_string(),
+                "続ける".to_string(),
+            ))
+            .blocking_show();
+        if !confirmed {
+            return Ok(None);
+        }
+        let (file, backup) = crate::virtual_contest::cancel(&dir)?;
+        notify_broken_virtual(&app, backup);
+        Ok(Some(file))
+    })
+    .await
+    .map_err(|_| "バーチャル参加をやめられません".to_string())?
+}
+
+// Python のソースを ruff で整形する（Phase 41。D-265）。path は作業領域のルートからの相対パス（設定ファイルを探す場所）、
+// text はエディタの今の中身。整形したソースを返す（ファイルには書かない。置き換えと保存は画面側）。
+// ほかの言語の整形（言語サーバー）と同じく、信頼した作業領域だけで行う
+#[tauri::command]
+pub async fn format_python(
+    path: String,
+    text: String,
+    app: AppHandle,
+    workspace: State<'_, Workspace>,
+) -> Result<String, String> {
+    let root = workspace.trusted_root()?;
+    let dir = app_dir(&app)?;
+    let file = crate::workspace::resolve(&root, &path).map_err(|error| error.to_string())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let ruff = crate::ruff::find(&storage::python_settings(&dir).ruff)?;
+        crate::ruff::format(&ruff, &file, &text, crate::ruff::TIMEOUT)
+    })
+    .await
+    .map_err(|_| "Python のソースを整形できません".to_string())?
+}
+
+// 1 問のメモを書く（Phase 39。D-263）。空白だけなら消す。変えたら書いた日を今日にする。変えたあとのすべての記録を返す
+#[tauri::command]
+pub async fn set_problem_memo(
+    id: String,
+    memo: String,
+    app: AppHandle,
+) -> Result<crate::problem_marks::Marks, String> {
+    ensure_primary(&app)?;
+    let dir = app_dir(&app)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let today = crate::problem_marks::today();
+        let (marks, backup) = crate::problem_marks::set_memo(&dir, &id, &memo, &today)?;
+        notify_broken_marks(&app, backup);
+        Ok(marks)
+    })
+    .await
+    .map_err(|_| "メモを保存できません".to_string())?
+}
+
+// サイドバーの「メモ」の一覧（Phase 39。D-263）。メモのある問題を、最後に書いた日の新しい順に返す
+// （場所・diff は、保存してある AtCoder Problems のデータだけで出す）
+#[tauri::command]
+pub async fn memo_problems(app: AppHandle) -> Result<crate::atcoder_problems::RetryView, String> {
+    ensure_primary(&app)?;
+    let dir = app_dir(&app)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let (marks, backup) = crate::problem_marks::load(&dir)?;
+        notify_broken_marks(&app, backup);
+        Ok(crate::atcoder_problems::marks_view(
+            &dir,
+            &marks,
+            None,
+            crate::atcoder_problems::MarkList::Memo,
+        ))
+    })
+    .await
+    .map_err(|_| "メモの一覧を読めません".to_string())?
+}
+
 // 「過去問」の「解説 AC」の一覧（Phase 37。D-261）。「解説」を付けた問題を、保存してある AtCoder Problems のデータと
 // AC 状況と合わせて返す（新しく読まない）。並べ方の切り替えは画面側
 #[tauri::command]
@@ -1957,6 +2256,116 @@ pub async fn create_contest_packages(
 #[tauri::command]
 pub fn stop_scaffold(control: State<'_, ScaffoldControl>) {
     control.stop();
+}
+
+// 予約の間の知らせ（Phase 43。D-267）。作り始めたあとの経過は ScaffoldEvent で送る
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    tag = "type"
+)]
+pub enum ReserveEvent {
+    // 予約した。開始を待つ（start は UNIX 時間の秒）
+    Waiting {
+        start: i64,
+    },
+    // 問題の一覧を読めなかった。wait 秒あとに読み直す（attempt は読み直しの何回目か）
+    Retrying {
+        attempt: usize,
+        wait: u64,
+        message: String,
+    },
+    // 問題の一覧を読めた。作り始める
+    Creating,
+}
+
+// 開始前のコンテストを予約し、開始の 1 秒後に「コンテストを作る」と同じに作る（Phase 43。D-267。D-111 を広げた）。
+// 開始を待つ間も返らない。取り消したら null。作り終えたら、窓が手前になければ通知で知らせる
+#[tauri::command]
+pub async fn reserve_contest(
+    contest: String,
+    on_wait: tauri::ipc::Channel<ReserveEvent>,
+    on_event: tauri::ipc::Channel<ScaffoldEvent>,
+    app: AppHandle,
+) -> Result<Option<ContestCreated>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        ProblemId::new(&contest, "x")?;
+        app.state::<Workspace>().root()?;
+        // 開催期間（ツールバーの残り時間と同じ。覚えてあれば読まない）
+        let period = submit::contest_period(&submit::Remote::app(), &contest, false)?;
+        crate::reserve::check(period.start, period.end, crate::reserve::now_ms())?;
+        let generation = crate::reserve::begin(&contest)?;
+        let _finish = crate::reserve::Finish(generation);
+        let _ = on_wait.send(ReserveEvent::Waiting {
+            start: period.start,
+        });
+        let cancelled = || !crate::reserve::active(generation);
+        let sleep = |duration| std::thread::sleep(duration);
+        let start = period.start * 1000 + crate::reserve::START_DELAY_MS;
+        if !crate::reserve::wait_until(start, &cancelled, &crate::reserve::now_ms, &sleep) {
+            return Ok(None);
+        }
+        // 眠っていて、起きたらもう終わっていた
+        if crate::reserve::now_ms() >= period.end * 1000 {
+            return Err(format!("{contest} は終わっていたので、作りませんでした"));
+        }
+        let dir = app_dir(&app)?;
+        let listed = crate::reserve::list_with_retries(
+            &|| problem::load_task_list(&dir, &contest, true),
+            &|duration| {
+                let until = crate::reserve::now_ms() + duration.as_millis() as i64;
+                crate::reserve::wait_until(until, &cancelled, &crate::reserve::now_ms, &sleep)
+            },
+            &|attempt, wait, message| {
+                let _ = on_wait.send(ReserveEvent::Retrying {
+                    attempt,
+                    wait,
+                    message: message.to_string(),
+                });
+            },
+        )?;
+        if listed.is_none() {
+            return Ok(None);
+        }
+        // 作り始める。ここからの取り消しは、作るのを止める（今の問題を取り終えたところで止まる）
+        let root = app.state::<Workspace>().root()?;
+        let control = app.state::<ScaffoldControl>();
+        let (_running, cancel) = control.begin()?;
+        crate::reserve::set_creating(generation);
+        if cancelled() {
+            return Ok(None);
+        }
+        let _ = on_wait.send(ReserveEvent::Creating);
+        let template = template_for(&dir)?;
+        let created = scaffold::create_contest(
+            &root,
+            &contest,
+            &template,
+            // 一覧は今読んで保存したものを使う
+            &|contest| problem::load_task_list(&dir, contest, false),
+            &|tasks| {
+                problem::prefetch_contest(&dir, &contest, tasks);
+            },
+            &|id| problem::load_problem(&dir, id, false),
+            &cancel,
+            &|event| {
+                let _ = on_event.send(event);
+            },
+        )?;
+        crate::notify::contest_created(&app, &created);
+        Ok(Some(created))
+    })
+    .await
+    .map_err(|_| "予約したコンテストを作れません".to_string())?
+}
+
+// 予約を取り消す。作っている途中なら、作るのを止める。予約がなければ何もしない
+#[tauri::command]
+pub fn cancel_reservation(control: State<'_, ScaffoldControl>) {
+    if crate::reserve::cancel() == Some(true) {
+        control.stop();
+    }
 }
 
 // パッケージ（作業領域のルートからの相対パス）で選んだ問題。なければ null（D-117）
@@ -2571,6 +2980,7 @@ pub async fn save_settings(
     atcoder_problems: AtcoderProblemsSettings,
     problem: ProblemSettings,
     interpreter: Interpreter,
+    format_on_save: bool,
     standings: storage::StandingsSettings,
 ) -> Result<SaveSettingsOutcome, String> {
     ensure_primary(&app)?;
@@ -2609,6 +3019,7 @@ pub async fn save_settings(
         &atcoder_problems,
         &problem,
         interpreter,
+        format_on_save,
         &standings,
     )?;
     stamp.update(&dir)?;

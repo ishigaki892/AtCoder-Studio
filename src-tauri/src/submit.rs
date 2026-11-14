@@ -2076,6 +2076,10 @@ pub struct MineRow {
     pub task: String,
     // 判定の欄の文字（例：AC、WA、WJ、3/15 WA）
     pub verdict: String,
+    // 提出日時（UNIX 時間の秒。`<time>` の「2026-03-30 15:56:00+0900」。バーチャル参加に使う。Phase 44。D-268）
+    pub time: Option<i64>,
+    // 得点の 100 倍（得点の欄の文字。判定中の行にはない）
+    pub score: Option<u64>,
 }
 
 // 「自分の提出」の 1 ページ（`/contests/<コンテスト>/submissions/me?page=<page>`）の行と、次のページへのリンクがあるか。
@@ -2110,6 +2114,16 @@ pub fn parse_mine_page(html: &str, contest: &str, page: u32) -> (Vec<MineRow>, b
                     })
                 })?;
             let verdict = squash(&row.select("span.label").first().text());
+            let time = parse_time(&row.select("time").first().text());
+            let score = row
+                .select(".submission-score")
+                .first()
+                .text()
+                .trim()
+                .parse::<f64>()
+                .ok()
+                .filter(|score| score.is_finite() && *score >= 0.0)
+                .map(|score| (score * 100.0).round() as u64);
             Some(MineRow {
                 id,
                 task,
@@ -2118,6 +2132,8 @@ pub fn parse_mine_page(html: &str, contest: &str, page: u32) -> (Vec<MineRow>, b
                 } else {
                     verdict
                 },
+                time,
+                score,
             })
         })
         .collect();
@@ -2168,6 +2184,9 @@ pub struct ContestStatus {
     pub standings: crate::standings::StandingsOutcome,
     // 「自分の提出」のページから分かった、ログインしているユーザー（分からなければ None）
     pub user: Option<String>,
+    // このコンテストでバーチャル参加している間の、バーチャルの時間の中の結果（Phase 44。D-268）。
+    // ペナルティ 1 つあたりの時間は 5 分として出す（終えるときは順位表から求める）
+    pub virtual_score: Option<crate::virtual_contest::Score>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -2395,10 +2414,24 @@ pub fn contest_status(
         Ok(tasks) => tasks,
         Err(message) => return StatusOutcome::Failed { message },
     };
+    // このコンテストでバーチャル参加しているか（読めなければ、していないとする）
+    let current = crate::virtual_contest::load(app_dir)
+        .ok()
+        .and_then(|(file, _)| file.current)
+        .filter(|current| current.contest == contest);
     match read_mine(remote, contest) {
         Ok(mine) => StatusOutcome::Read {
             status: Box::new(ContestStatus {
                 contest: contest.to_string(),
+                virtual_score: current.map(|current| {
+                    crate::virtual_contest::score(
+                        &tasks,
+                        &mine.rows,
+                        &current,
+                        current.end,
+                        crate::virtual_contest::DEFAULT_PENALTY_SECS,
+                    )
+                }),
                 tasks: summarize(&tasks, &mine.rows),
                 read_at_ms: now_ms(),
                 truncated: mine.truncated,
@@ -2410,6 +2443,97 @@ pub fn contest_status(
         Err(message) if message == NOT_LOGGED_IN => StatusOutcome::NotLoggedIn,
         Err(message) => StatusOutcome::Failed { message },
     }
+}
+
+// バーチャル参加を終えるときの結果（Phase 44。D-268）。「自分の提出」を全部のページ読み、until（時間が終わった時刻か、
+// やめた時刻）までの提出で得点と時間を出す。順位表を 1 回読み（保存しない。D-233）、ペナルティの時間を求めて、
+// 当時の順位表に当てはめた順位と予想 perf を出す。順位表が読めなくても、得点と時間は残す（順位の代わりに理由）
+pub fn virtual_result(
+    remote: &Remote,
+    app_dir: &Path,
+    current: &crate::virtual_contest::Current,
+    until: i64,
+) -> Result<crate::virtual_contest::Record, String> {
+    use crate::virtual_contest::{self as virtual_contest, Record};
+    let contest = current.contest.as_str();
+    match remote.logged_in() {
+        Ok(true) => {}
+        Ok(false) => {
+            return Err(
+                "ログインしていないので、「自分の提出」を読めません。ログインしてから、もう一度押してください"
+                    .to_string(),
+            );
+        }
+        Err(message) => return Err(message),
+    }
+    let tasks = crate::problem::load_task_list(app_dir, contest, false)?;
+    let mine = read_mine(remote, contest).map_err(|message| {
+        if message == NOT_LOGGED_IN {
+            "ログインが切れていたので、「自分の提出」を読めません。ログインしてから、もう一度押してください"
+                .to_string()
+        } else {
+            message
+        }
+    })?;
+    let finished = until.min(current.end);
+    let mut note = mine.truncated.then(|| {
+        format!(
+            "提出が多いので、新しい {} ページ分だけを見ました",
+            mine.pages
+        )
+    });
+    let standings = read_contest_info(remote, contest).and_then(|info| {
+        let reply = remote.get_compressed(&format!("/contests/{contest}/standings/json"))?;
+        if reply.status != 200 {
+            return Err(format!("順位表を読めません（HTTP {}）", reply.status));
+        }
+        Ok((info, crate::standings::parse_standings(&reply.body)?))
+    });
+    let (score, place) = match &standings {
+        Ok((info, data)) => {
+            let penalty = crate::standings::penalty_seconds(data)
+                .unwrap_or(virtual_contest::DEFAULT_PENALTY_SECS);
+            let score = virtual_contest::score(&tasks, &mine.rows, current, finished, penalty);
+            let place = crate::standings::virtual_place(
+                data,
+                info.kind,
+                info.start,
+                score.score as f64,
+                score.elapsed,
+            );
+            (score, Some(place))
+        }
+        Err(message) => {
+            note = Some(format!(
+                "順位表を読めなかったので、順位と予想 perf は出しません（{message}）"
+            ));
+            let score = virtual_contest::score(
+                &tasks,
+                &mine.rows,
+                current,
+                finished,
+                virtual_contest::DEFAULT_PENALTY_SECS,
+            );
+            (score, None)
+        }
+    };
+    Ok(Record {
+        contest: contest.to_string(),
+        start: current.start,
+        end: current.end,
+        finished,
+        result: score,
+        rank: place.as_ref().map(|place| place.rank),
+        participants: place.as_ref().map(|place| place.participants),
+        performance: place.as_ref().and_then(|place| place.performance),
+        note: {
+            let notes: Vec<String> = [place.and_then(|place| place.note), note]
+                .into_iter()
+                .flatten()
+                .collect();
+            (!notes.is_empty()).then(|| notes.join("。"))
+        },
+    })
 }
 
 fn open_in_browser(url: &str) -> Result<(), String> {
@@ -4246,7 +4370,7 @@ mod tests {
 
     #[test]
     fn reads_rows_and_the_next_page_link() {
-        // 本物のページを短くした見本：問題・提出の ID・判定
+        // 本物のページを短くした見本：問題・提出の ID・判定・提出日時（2026-10-17 21:00:30+0900 など）・得点（100 倍）
         let (rows, has_next) = parse_mine_page(MINE_PAGE, "abc480", 1);
         assert_eq!(
             rows,
@@ -4254,17 +4378,23 @@ mod tests {
                 MineRow {
                     id: 10000003,
                     task: "abc480_d".to_string(),
-                    verdict: "AC".to_string()
+                    verdict: "AC".to_string(),
+                    time: Some(1792238430),
+                    score: Some(40000),
                 },
                 MineRow {
                     id: 10000002,
                     task: "abc480_c".to_string(),
-                    verdict: "AC".to_string()
+                    verdict: "AC".to_string(),
+                    time: Some(1792238420),
+                    score: Some(30000),
                 },
                 MineRow {
                     id: 10000001,
                     task: "abc480_c".to_string(),
-                    verdict: "WA".to_string()
+                    verdict: "WA".to_string(),
+                    time: Some(1792238410),
+                    score: Some(0),
                 },
             ]
         );
@@ -4278,7 +4408,9 @@ mod tests {
             vec![MineRow {
                 id: 7,
                 task: "x_a".to_string(),
-                verdict: "3/15 WA".to_string()
+                verdict: "3/15 WA".to_string(),
+                time: None,
+                score: None,
             }]
         );
         // ページ送り：次のページへのリンク（ほかのクエリが付いていてもよい）
@@ -4294,21 +4426,29 @@ mod tests {
                 id: 5,
                 task: "x_b".to_string(),
                 verdict: "WA".to_string(),
+                time: None,
+                score: None,
             },
             MineRow {
                 id: 3,
                 task: "x_b".to_string(),
                 verdict: "AC".to_string(),
+                time: None,
+                score: None,
             },
             MineRow {
                 id: 4,
                 task: "x_a".to_string(),
                 verdict: "TLE".to_string(),
+                time: None,
+                score: None,
             },
             MineRow {
                 id: 9,
                 task: "x_z".to_string(),
                 verdict: "WJ".to_string(),
+                time: None,
+                score: None,
             },
         ];
         let tasks = task_entries(&[("x_a", "A"), ("x_b", "B"), ("x_c", "C")]);

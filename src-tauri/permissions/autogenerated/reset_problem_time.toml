@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-reset-problem-time"
+description = "Enables the reset_problem_time command without any pre-configured scope."
+commands.allow = ["reset_problem_time"]
+
+[[permission]]
+identifier = "deny-reset-problem-time"
+description = "Denies the reset_problem_time command without any pre-configured scope."
+commands.deny = ["reset_problem_time"]

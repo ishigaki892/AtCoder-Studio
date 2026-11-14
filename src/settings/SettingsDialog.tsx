@@ -14,6 +14,8 @@ import {
   PROBLEM_BUTTONS,
   type Appearance,
   type Interpreter,
+  type PythonChoice,
+  pythonChoiceOf,
   type AtcoderProblemsSettings,
   type StandingsSettings,
   type LoadedKeyBinding,
@@ -86,7 +88,7 @@ type Props = {
     notify: NotifySettings,
     atcoderProblems: AtcoderProblemsSettings,
     problem: ProblemSettings,
-    interpreter: Interpreter,
+    python: PythonChoice,
     standings: StandingsSettings,
   ) => void;
   // 外で変わっていて保存できなかった。App が読み直す（resetSeq が進む）
@@ -127,7 +129,7 @@ function SettingsDialog({
   const [pastDraft, setPastDraft] = useState<AtcoderProblemsSettings>(atcoderProblems);
   const [followDraft, setFollowDraft] = useState<StandingsSettings>(standings);
   const [problemDraft, setProblemDraft] = useState<ProblemSettings>(problem);
-  const [interpreterDraft, setInterpreterDraft] = useState<Interpreter>(python.interpreter);
+  const [pythonDraft, setPythonDraft] = useState<PythonChoice>(pythonChoiceOf(python));
   const [capturing, setCapturing] = useState<Command | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -145,7 +147,7 @@ function SettingsDialog({
     setPastDraft(atcoderProblems);
     setFollowDraft(standings);
     setProblemDraft(problem);
-    setInterpreterDraft(python.interpreter);
+    setPythonDraft(pythonChoiceOf(python));
     setCapturing(null);
     setNotice("settings.json が外で変わったので、読み直しました。必要なら、もう一度変えてください");
   }, [resetSeq]);
@@ -256,7 +258,7 @@ function SettingsDialog({
         notifyDraft,
         pastDraft,
         problemDraft,
-        interpreterDraft,
+        pythonDraft,
         followDraft,
       );
       if (outcome === "changedOutside") {
@@ -268,7 +270,7 @@ function SettingsDialog({
         return;
       }
       setKeyBindings(bindings);
-      onSaved(appearanceToSave, submitDraft, notifyDraft, pastDraft, problemDraft, interpreterDraft, followDraft);
+      onSaved(appearanceToSave, submitDraft, notifyDraft, pastDraft, problemDraft, pythonDraft, followDraft);
       onClose();
       if (ui) {
         onSwitchToEditor();
@@ -424,7 +426,7 @@ function SettingsDialog({
             </div>
           )}
           {section === "python" && (
-            <PythonSection python={python} interpreter={interpreterDraft} onChange={setInterpreterDraft} />
+            <PythonSection python={python} choice={pythonDraft} onChange={setPythonDraft} />
           )}
           {section === "templates" && <TemplatesSection onError={setNotice} />}
           {section === "view" && (
@@ -589,13 +591,14 @@ function NotifySection({
 // Python（Phase 19 作業 3。D-221）：手元で使う処理系。処理系のパスは settings.json で書く
 function PythonSection({
   python,
-  interpreter,
+  choice,
   onChange,
 }: {
   python: PythonSettings;
-  interpreter: Interpreter;
-  onChange: (next: Interpreter) => void;
+  choice: PythonChoice;
+  onChange: (next: PythonChoice) => void;
 }) {
+  const interpreter = choice.interpreter;
   const path = interpreter === "cpython" ? python.cpython : python.pypy;
   return (
     <div className="settings-view">
@@ -604,7 +607,7 @@ function PythonSection({
         <select
           className="settings-select"
           value={interpreter}
-          onChange={(event) => onChange(event.target.value as Interpreter)}
+          onChange={(event) => onChange({ ...choice, interpreter: event.target.value as Interpreter })}
         >
           {INTERPRETERS.map(({ value, label }) => (
             <option key={value} value={value}>
@@ -618,6 +621,19 @@ function PythonSection({
         {path
           ? `処理系のパス：${path}（settings.json で書いたもの）。`
           : "処理系は /opt/homebrew/bin・PATH・/usr/local/bin から探します（決まったパスを使うときは、settings.json の python.cpython・python.pypy に書きます）。"}
+      </p>
+      {/* ⌘S で ruff で整形するか（Phase 41。D-265） */}
+      <label className="settings-check">
+        <input
+          type="checkbox"
+          checked={choice.formatOnSave}
+          onChange={(event) => onChange({ ...choice, formatOnSave: event.target.checked })}
+        />
+        ⌘S で整形する（ruff）
+      </label>
+      <p className="settings-note">
+        .py は ruff（brew install ruff）で整形します。⇧⌥F ではいつも整形します。オフにすると、⌘S では整形せずに保存します。
+        {python.ruff ? `ruff のパス：${python.ruff}（settings.json で書いたもの）。` : "ruff は /opt/homebrew/bin・PATH・/usr/local/bin から探します（決まったパスを使うときは、settings.json の python.ruff に書きます）。"}
       </p>
     </div>
   );
@@ -695,6 +711,18 @@ function ProblemSection({
         を for _ in 0..t {"{"} solve(); {"}"} にします。すでに for の中で呼んでいれば、そのままにします。C++ では、main() に T
         を読むコードを入れ、solve(); を for (int i = 0; i &lt; T; i++) solve(); にします。Python では、main() に T
         を読むコードを入れ、solve() を for _ in range(T): の中にします。
+      </p>
+      {/* 問題ごとの経過時間（Phase 42。D-266） */}
+      <label className="settings-check">
+        <input
+          type="checkbox"
+          checked={draft.timer}
+          onChange={(event) => onChange({ ...draft, timer: event.target.checked })}
+        />
+        経過時間を出す
+      </label>
+      <p className="settings-note">
+        問題文の欄の制限の行に、その問題を出していた時間（⏱）を出します。AC が分かったら止まります。オフにすると、出さず、数えません。
       </p>
     </div>
   );

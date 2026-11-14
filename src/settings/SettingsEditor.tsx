@@ -14,6 +14,8 @@ import {
   type AtcoderProblemsSettings,
   type StandingsSettings,
   type Interpreter,
+  type PythonChoice,
+  pythonChoiceOf,
   type LoadedKeyBinding,
   type NotifySettings,
   type ProblemSettings,
@@ -63,7 +65,7 @@ type Props = {
     notify: NotifySettings,
     atcoderProblems: AtcoderProblemsSettings,
     problem: ProblemSettings,
-    interpreter: Interpreter,
+    python: PythonChoice,
     standings: StandingsSettings,
   ) => void;
   // 外で変わっていて保存できなかった。App が読み直す（resetSeq が進む）
@@ -141,7 +143,7 @@ function SettingsEditor(props: Props) {
   const [pastDraft, setPastDraft] = useState<AtcoderProblemsSettings>(atcoderProblems);
   const [followDraft, setFollowDraft] = useState<StandingsSettings>(standings);
   const [problemDraft, setProblemDraft] = useState<ProblemSettings>(problem);
-  const [interpreterDraft, setInterpreterDraft] = useState<Interpreter>(python.interpreter);
+  const [pythonDraft, setPythonDraft] = useState<PythonChoice>(pythonChoiceOf(python));
   const [capturing, setCapturing] = useState<Command | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [query, setQuery] = useState("");
@@ -157,7 +159,7 @@ function SettingsEditor(props: Props) {
     notifyDraft,
     pastDraft,
     problemDraft,
-    interpreterDraft,
+    pythonDraft,
     followDraft,
   });
   latest.current = {
@@ -167,7 +169,7 @@ function SettingsEditor(props: Props) {
     notifyDraft,
     pastDraft,
     problemDraft,
-    interpreterDraft,
+    pythonDraft,
     followDraft,
   };
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -202,7 +204,7 @@ function SettingsEditor(props: Props) {
           v.notifyDraft,
           v.pastDraft,
           v.problemDraft,
-          v.interpreterDraft,
+          v.pythonDraft,
           v.followDraft,
         );
         if (outcome === "changedOutside") {
@@ -225,7 +227,7 @@ function SettingsEditor(props: Props) {
           v.notifyDraft,
           v.pastDraft,
           v.problemDraft,
-          v.interpreterDraft,
+          v.pythonDraft,
           v.followDraft,
         );
       } while (pending.current);
@@ -274,7 +276,7 @@ function SettingsEditor(props: Props) {
     setPastDraft(atcoderProblems);
     setFollowDraft(standings);
     setProblemDraft(problem);
-    setInterpreterDraft(python.interpreter);
+    setPythonDraft(pythonChoiceOf(python));
     setCapturing(null);
     setNotice("settings.json が外で変わったので、読み直しました");
   }, [resetSeq]);
@@ -292,7 +294,7 @@ function SettingsEditor(props: Props) {
     setPastDraft(atcoderProblems);
     setFollowDraft(standings);
     setProblemDraft(problem);
-    setInterpreterDraft(python.interpreter);
+    setPythonDraft(pythonChoiceOf(python));
   }, [appearance, submit, notify, atcoderProblems, standings, problem, python]);
 
   // 隠れたら、キーの受け取りをやめる（隠れている間に押したキーを、割り当てに使わない。C-8）
@@ -429,13 +431,14 @@ function SettingsEditor(props: Props) {
     language: hit("問題を作るときの言語", "problem.language", "Rust", "C++", "Python", "問題文"),
     fillInput: hit("input! を入れておく", "problem.fillInput", "入力のコード", "問題文"),
     mainLoop: hit("main() に for も書く", "problem.mainLoop", "テストケースが複数", "問題文"),
+    timer: hit("経過時間を出す", "problem.timer", "経過時間", "時間", "問題文"),
     testFirst: hit("提出の前のサンプルテスト", "submit.testBeforeSubmit", "提出"),
     confirm: hit("提出の確認のダイアログ", "submit.confirmDialog", "提出"),
     judge: hit("判定の通知", "notify.judge", "通知", "提出の判定が決まったときに知らせる"),
     start: hit("コンテストの開始の通知", "notify.contestStart", "通知", "残り時間"),
     user: hit("AtCoder の ID", "atcoderProblems.user", "過去問", "AtCoder Problems", "AC 状況"),
     follow: hit("追跡するユーザー", "standings.follow", "追跡", "ユーザー", "順位表", "AC 状況", "ライバル"),
-    python: hit("Python の処理系", "python.interpreter", "CPython", "PyPy", "言語"),
+    python: hit("Python の処理系", "python.interpreter", "CPython", "PyPy", "言語", "⌘S で整形する", "python.formatOnSave", "ruff", "整形"),
     snippets: LANGUAGES.filter(({ value, label }) => hit("スニペット", label, snippetsFile(value), "snippets")),
     templates: hit(
       "テンプレート",
@@ -459,7 +462,7 @@ function SettingsEditor(props: Props) {
     view: show.rainbow || show.lens || show.crumbs || show.editorSize || show.problemSize || show.ui,
     keys: show.keys,
     colors: colorGroups.some((g) => g.shown),
-    problem: show.buttons || show.language || show.fillInput || show.mainLoop,
+    problem: show.buttons || show.language || show.fillInput || show.mainLoop || show.timer,
     submit: show.testFirst || show.confirm,
     notify: show.judge || show.start,
     past: show.user,
@@ -775,6 +778,15 @@ function SettingsEditor(props: Props) {
               onChange={(on) => change(setProblemDraft, (c) => ({ ...c, mainLoop: on }))}
             />
           )}
+          {show.timer && (
+            <CheckItem
+              title="経過時間"
+              jsonKey="problem.timer"
+              label="問題文の欄に、その問題を出していた時間を出す（AC が分かったら止まる。オフなら数えない）"
+              checked={problemDraft.timer}
+              onChange={(on) => change(setProblemDraft, (c) => ({ ...c, timer: on }))}
+            />
+          )}
           {sections.submit && heading("submit", "提出", 3)}
           {show.testFirst && (
             <CheckItem
@@ -862,10 +874,10 @@ function SettingsEditor(props: Props) {
             >
               <select
                 className="settings-select"
-                value={interpreterDraft}
+                value={pythonDraft.interpreter}
                 onChange={(event) => {
                   const next = event.target.value as Interpreter;
-                  change(setInterpreterDraft, () => next);
+                  change(setPythonDraft, (current) => ({ ...current, interpreter: next }));
                 }}
               >
                 {INTERPRETERS.map(({ value, label }) => (
@@ -874,6 +886,26 @@ function SettingsEditor(props: Props) {
                   </option>
                 ))}
               </select>
+            </Item>
+          )}
+          {show.python && (
+            <Item
+              title="⌘S で整形する（ruff）"
+              jsonKey="python.formatOnSave"
+              description={`.py を ruff（brew install ruff）で整形してから保存します。⇧⌥F ではいつも整形します。${
+                python.ruff
+                  ? "ruff は settings.json の python.ruff に書いたものを使います。"
+                  : "ruff は /opt/homebrew/bin・PATH・/usr/local/bin から探します。"
+              }`}
+            >
+              <input
+                type="checkbox"
+                checked={pythonDraft.formatOnSave}
+                onChange={(event) => {
+                  const on = event.target.checked;
+                  change(setPythonDraft, (current) => ({ ...current, formatOnSave: on }));
+                }}
+              />
             </Item>
           )}
 

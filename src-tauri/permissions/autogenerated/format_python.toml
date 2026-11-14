@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-format-python"
+description = "Enables the format_python command without any pre-configured scope."
+commands.allow = ["format_python"]
+
+[[permission]]
+identifier = "deny-format-python"
+description = "Denies the format_python command without any pre-configured scope."
+commands.deny = ["format_python"]

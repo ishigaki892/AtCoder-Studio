@@ -30,8 +30,8 @@ import {
   DEFAULT_PROBLEM_SETTINGS,
   DEFAULT_PYTHON_SETTINGS,
   type Appearance,
-  type Interpreter,
   type ProblemSettings,
+  type PythonChoice,
   type PythonSettings,
   type SettingsView,
   type SubmitSettings,
@@ -83,6 +83,8 @@ import BottomPanel, { type PanelTab } from "./panels/BottomPanel";
 import ProblemPane from "./panels/ProblemPane";
 import ProblemSelector from "./panels/ProblemSelector";
 import ContestClock from "./panels/ContestClock";
+import VirtualClock from "./panels/VirtualClock";
+import { virtualState, type VirtualFile } from "./ipc/virtualContest";
 import PastProblems from "./panels/PastProblems";
 import {
   addTestCase,
@@ -98,6 +100,7 @@ import {
   findAllReferences,
   formatActiveDocument,
   formatBeforeSave,
+  setPythonFormatOnSave,
   goToDefinition,
   restartLsp,
   setFileOpener,
@@ -133,8 +136,9 @@ import BottomRightPanel, { type BottomRightTab } from "./panels/BottomRightPanel
 import FollowPanel, { followEntryAfter, type FollowEntry } from "./panels/FollowPanel";
 import SubmissionPanel, { upsertSubmission, type SubmitNotice } from "./panels/SubmissionPanel";
 import { copyText } from "./panels/copyText";
-import { askRestartPackage, copySource, createRandomPrograms, restartPackage } from "./ipc/scaffold";
-import { problemMarks, setProblemMark, setProblemRetry, type ProblemMarks, type SolvedBy } from "./ipc/problemMarks";
+import { askRestartPackage, cancelReservation, copySource, createRandomPrograms, restartPackage } from "./ipc/scaffold";
+import { problemMarks, setProblemMark, setProblemMemo, setProblemRetry, type ProblemMarks, type SolvedBy } from "./ipc/problemMarks";
+import MemoPanel from "./panels/MemoPanel";
 import { joiKindOf, type JoiKind } from "./ipc/atcoderProblems";
 import {
   atcoderLogin,
@@ -151,6 +155,7 @@ import {
   type SessionView,
   type StandingsOutcome,
   type SubmissionView,
+  type ContestStatus,
 } from "./ipc/submit";
 
 // ファイルのアイコン（アイコンのライブラリは使わない。D-031）
@@ -227,6 +232,24 @@ function ContestIcon() {
   );
 }
 
+// アクティビティバーの「メモ」（Phase 39。D-263）。鉛筆
+function MemoIcon() {
+  return (
+    <svg
+      width="24"
+      height="24"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      aria-hidden="true"
+    >
+      <path d="M4 20l1-4L16.5 4.5a2.1 2.1 0 0 1 3 3L8 19z" />
+      <path d="M14.5 6.5l3 3" />
+    </svg>
+  );
+}
+
 // アクティビティバーの下端の「設定」（Phase 8 作業 6。D-159）。歯車
 function SettingsIcon() {
   return (
@@ -285,14 +308,15 @@ const EXTRA_LABELS: Record<ExtraKind, string> = { past: "過去問", settings: "
 // 横幅を変えられる列（ファイル一覧・右列）の状態
 type ColumnState = { width: number; visible: boolean };
 // サイドバーの中身（Phase 12 作業 1。D-182）。エクスプローラー（ファイル一覧）・検索・実行とデバッグ・
-// コンテスト（Phase 18 作業 4。D-218）
-type SidebarView = "files" | "search" | "debug" | "contest";
+// コンテスト（Phase 18 作業 4。D-218）・メモ（Phase 39。D-263）
+type SidebarView = "files" | "search" | "debug" | "contest" | "memo";
 // command は、マウスを乗せたときにキーを出すのに使う（D-245）
 const SIDEBAR_VIEWS: { view: SidebarView; label: string; command: Command }[] = [
   { view: "files", label: "エクスプローラー", command: "showExplorer" },
   { view: "search", label: "検索", command: "showSearch" },
   { view: "debug", label: "実行とデバッグ", command: "showDebug" },
   { view: "contest", label: "コンテスト", command: "showContest" },
+  { view: "memo", label: "メモ", command: "showMemo" },
 ];
 function SidebarIcon({ view }: { view: SidebarView }) {
   switch (view) {
@@ -304,6 +328,8 @@ function SidebarIcon({ view }: { view: SidebarView }) {
       return <DebugIcon />;
     case "contest":
       return <ContestIcon />;
+    case "memo":
+      return <MemoIcon />;
   }
 }
 function sidebarViewOf(value: string): SidebarView {
@@ -397,6 +423,10 @@ function App() {
   async function changeRetry(id: string, on: boolean) {
     setMarks(await setProblemRetry(id, on));
   }
+  // 問題ごとのメモ（Phase 39。D-263）
+  async function changeMemo(id: string, memo: string) {
+    setMarks(await setProblemMemo(id, memo));
+  }
   // 「白紙から解き直す」「生成器と愚直解を作る」を押せない理由（D-258・D-259）。押せるのは、問題文の欄の問題が、
   // 実行の対象のパッケージのフォルダから決まった問題と同じとき（過去問の表などから同じ問題を出して、結び付きを外していても同じなら押せる）
   function restartBlocked(): string | undefined {
@@ -460,6 +490,10 @@ function App() {
   const [problemSettings, setProblemSettings] = useState<ProblemSettings>(DEFAULT_PROBLEM_SETTINGS);
   // Python の設定（Phase 19 作業 3。D-221）。設定の画面に使う。動かすときは Rust 側が読み直す
   const [pythonSettings, setPythonSettings] = useState<PythonSettings>(DEFAULT_PYTHON_SETTINGS);
+  // ⌘S で .py を ruff で整形するか（Phase 41。D-265）を、エディタの整形に伝える
+  useEffect(() => {
+    setPythonFormatOnSave(pythonSettings.formatOnSave);
+  }, [pythonSettings.formatOnSave]);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsSeq, setSettingsSeq] = useState(0);
   const settingsOpenRef = useRef(false);
@@ -544,6 +578,15 @@ function App() {
   // ツールバーの残り時間のコンテスト（D-238）：今の問題のコンテスト。選択欄で「一覧」を押したときは、
   // 一覧が読めなくても（開始前でも）そのコンテストにする。問題が変わったら、その問題のコンテストに戻る
   const [clockContest, setClockContest] = useState<string | null>(null);
+  // 「コンテストを作る」で予約したコンテスト（Phase 43。D-267）。予約している間は、残り時間をこのコンテストにする
+  const [reservedContest, setReservedContest] = useState<string | null>(null);
+  // バーチャル参加（Phase 44。D-268）。読めるまでは null
+  const [virtualFile, setVirtualFile] = useState<VirtualFile | null>(null);
+  useEffect(() => {
+    virtualState()
+      .then(setVirtualFile)
+      .catch((e) => showError(`バーチャル参加を読めません：${String(e)}`));
+  }, []);
   useEffect(() => {
     if (currentProblem) {
       setClockContest(currentProblem.contest);
@@ -623,6 +666,17 @@ function App() {
   // 提出（Phase 6 作業 3。D-148）。ログインの状態、このアプリで出した提出、送らなかったときの知らせ
   const [session, setSession] = useState<SessionView | null>(null);
   const [submissions, setSubmissions] = useState<SubmissionView[]>([]);
+  // サイドバーの「コンテスト」の提出状況で AC と分かった問題（Phase 42。D-266。経過時間を止める）。アプリを開いている間だけ
+  const [acceptedFromStatus, setAcceptedFromStatus] = useState<ReadonlySet<string>>(new Set());
+  function noteStatus(status: ContestStatus) {
+    const tasks = status.tasks.filter((task) => task.accepted).map((task) => task.task);
+    setAcceptedFromStatus((current) => {
+      if (tasks.every((task) => current.has(task))) {
+        return current;
+      }
+      return new Set([...current, ...tasks]);
+    });
+  }
   const [submitNotice, setSubmitNotice] = useState<SubmitNotice | null>(null);
   const [copyNote, setCopyNote] = useState<string | null>(null);
   // 提出を送っている間（フォームの読み取り・確認のダイアログ・送信）。押した直後に同期的に立てる
@@ -1487,6 +1541,8 @@ function App() {
       showSidebarView("debug");
     } else if (command === "showContest") {
       showSidebarView("contest");
+    } else if (command === "showMemo") {
+      showSidebarView("memo");
     }
   }
 
@@ -1509,7 +1565,7 @@ function App() {
     notify: NotifySettings,
     atcoderProblems: AtcoderProblemsSettings,
     problem: ProblemSettings,
-    interpreter: Interpreter,
+    python: PythonChoice,
     standings: StandingsSettings,
   ) {
     setAppearance(saved);
@@ -1518,7 +1574,7 @@ function App() {
     setAtcoderProblemsSettings(atcoderProblems);
     setStandingsSettings(standings);
     setProblemSettings(problem);
-    setPythonSettings((current) => ({ ...current, interpreter }));
+    setPythonSettings((current) => ({ ...current, ...python }));
     // settings.json のタブを開いていれば、新しい中身に読み直す（未保存の編集があれば、そのまま。保存のときに外での変更として聞く）
     void reloadAppTab(SETTINGS_JSON);
   }
@@ -1916,6 +1972,7 @@ function App() {
                 hidden={!contestOpen}
                 initialContest={currentProblem?.contest ?? ""}
                 onCreated={handlePackagesCreated}
+                onReserve={setReservedContest}
                 onClose={() => setContestOpen(false)}
               />
             }
@@ -1971,6 +2028,20 @@ function App() {
               onLogin={() => void handleLogin()}
               onOpenPast={() => openExtra("past")}
               onStandings={applyStandings}
+              onStatus={noteStatus}
+              virtualFile={virtualFile}
+              onVirtual={setVirtualFile}
+            />
+          </PaneBoundary>
+        </div>
+        <div className="sidebar-view" hidden={sidebarView !== "memo"}>
+          <PaneBoundary name="メモ">
+            <MemoPanel
+              current={currentProblem}
+              marks={marks}
+              visible={sidebar.visible && sidebarView === "memo"}
+              onSave={changeMemo}
+              onSelect={showProblem}
             />
           </PaneBoundary>
         </div>
@@ -2031,7 +2102,18 @@ function App() {
           onSubmit={() => void handleSubmit()}
         />
         {/* 右端：コンテストの開始までの時間・残り時間（Phase 22。D-238） */}
-        <ContestClock contest={clockContest} />
+        <span className="toolbar-right">
+        <VirtualClock current={virtualFile?.current ?? null} />
+        <ContestClock contest={reservedContest ?? clockContest} />
+        {reservedContest && (
+          <span className="contest-reservation" title="開始の 1 秒後に「コンテストを作る」で作ります（アプリを閉じると予約は消えます）">
+            予約：{reservedContest} を作ります
+            <button type="button" className="contest-reservation-cancel" onClick={() => void cancelReservation().catch((e) => showError(String(e)))}>
+              取り消す
+            </button>
+          </span>
+        )}
+        </span>
         </PaneBoundary>
       </div>
 
@@ -2193,6 +2275,18 @@ function App() {
             marks={marks}
             onMark={changeMark}
             onRetry={changeRetry}
+            accepted={
+              currentProblem !== null &&
+              (acceptedFromStatus.has(currentProblem.task) ||
+                submissions.some(
+                  (submission) =>
+                    submission.task === currentProblem.task && submission.state === "done" && submission.judge?.label === "AC",
+                ))
+            }
+            onOpenMemo={() => {
+              setSidebarView("memo");
+              setSidebar((current) => ({ ...current, visible: true }));
+            }}
             folderBlocked={restartBlocked()}
             onRestart={restartProblem}
             onMakeRandom={makeRandomPrograms}

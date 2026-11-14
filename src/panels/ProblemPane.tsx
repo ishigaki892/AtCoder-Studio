@@ -31,6 +31,8 @@ import { replaceDocument, replaceInputMacros } from "../editor/inputMacro";
 import { isCppPath, isPythonPath } from "../editor/language";
 import type { Language } from "../ipc/workspace";
 import { isReadOnlyKey } from "../editor/readOnlyKey";
+import { firstLine } from "./MemoPanel";
+import ProblemClock from "./ProblemClock";
 
 // 問題文表示ゾーン（原典 §4.6。Phase 3a 作業 3）
 
@@ -237,6 +239,10 @@ type Props = {
   onRestart: (id: ProblemId) => Promise<string | null>;
   // 「生成器と愚直解を作る」を押したとき（知らせる文を返す。D-259）
   onMakeRandom: (id: ProblemId) => Promise<string>;
+  // メモのある問題の「✎」を押したとき（サイドバーの「メモ」を開く。Phase 39。D-263）
+  onOpenMemo: () => void;
+  // 問題文の欄の問題の AC が分かっている（経過時間を止める。Phase 42。D-266）
+  accepted: boolean;
 };
 
 function ProblemPane({
@@ -250,6 +256,8 @@ function ProblemPane({
   marks,
   onMark,
   onRetry,
+  onOpenMemo,
+  accepted,
   folderBlocked,
   onRestart,
   onMakeRandom,
@@ -685,6 +693,20 @@ function ProblemPane({
                     {difficultyText(difficulty.view)}
                   </span>
                 </>
+              )}
+              {/* 問題ごとの経過時間（D-266） */}
+              <ProblemClock task={problemId.task} enabled={settings.timer} accepted={accepted} onError={setNotice} />
+              {/* メモがあれば「✎」（D-263）。押すとサイドバーの「メモ」を開く */}
+              {marks[problemId.task]?.memo && (
+                <button
+                  type="button"
+                  className="problem-memo-mark"
+                  title={`メモ：${firstLine(marks[problemId.task]?.memo)}\n押すとサイドバーの「メモ」を開きます（⇧⌘M）`}
+                  aria-label="メモを開く"
+                  onClick={onOpenMemo}
+                >
+                  ✎
+                </button>
               )}
               {/* 自力 AC・解説 AC の記録（D-257）。押すとその記録、押されているものをもう一度押すと記録なし */}
               <span className="problem-marks" role="group" aria-label="どう解いたかの記録">

@@ -16,6 +16,7 @@ import {
   type RetryView,
 } from "../ipc/problemMarks";
 import { ratingClass } from "../rating";
+import { firstLine } from "./MemoPanel";
 
 export type MarkListMode = "retry" | "editorial";
 
@@ -156,6 +157,7 @@ function RetryList({ mode, tabs, user, loggedIn, current, onSelect, marks, onRet
                 <th>AC 状況</th>
                 {!editorial && <th>自力・解説</th>}
                 {sortHeader("since", "付けた日")}
+                <th>メモ</th>
                 {editorial ? <th>解き直し</th> : <th aria-label="操作" />}
               </tr>
             </thead>
@@ -193,6 +195,10 @@ function RetryList({ mode, tabs, user, loggedIn, current, onSelect, marks, onRet
                     {!editorial && <td>{row.solvedBy ? SOLVED_LABELS[row.solvedBy] : "—"}</td>}
                     <td title={editorial && !row.since ? "付けた日を記録する前（0.2.1 まで）に付けた記録です" : undefined}>
                       {row.since ?? "—"}
+                    </td>
+                    {/* メモの 1 行目（D-263）。マウスを乗せると全部 */}
+                    <td className="retry-memo" title={marks[row.problem]?.memo}>
+                      {firstLine(marks[row.problem]?.memo) || <span className="past-no-diff">—</span>}
                     </td>
                     <td>
                       {editorial ? (

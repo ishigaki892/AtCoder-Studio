@@ -92,6 +92,8 @@ export type ProblemSettings = {
   fillInput: boolean;
   // 問題・コンテストを作るときの言語（Phase 16 作業 3。D-208）
   language: Language;
+  // 問題文の欄に、問題ごとの経過時間を出して数える（Phase 42。D-266。既定はオン）
+  timer: boolean;
 };
 
 // 選べる言語と、画面に出す名前（D-208）
@@ -121,6 +123,7 @@ export const DEFAULT_PROBLEM_SETTINGS: ProblemSettings = {
   mainLoop: false,
   fillInput: false,
   language: "rust",
+  timer: true,
 };
 
 // settings.json の python の欄（Phase 19。D-221）。パスが空なら探す。設定の画面は処理系だけを変える
@@ -130,9 +133,26 @@ export type PythonSettings = {
   interpreter: Interpreter;
   cpython: string;
   pypy: string;
+  // ⌘S で、保存の前に ruff で整形するか（Phase 41。D-265。既定はオン）
+  formatOnSave: boolean;
+  // ruff の絶対パス（空なら探す。settings.json で書く）
+  ruff: string;
 };
 
-export const DEFAULT_PYTHON_SETTINGS: PythonSettings = { interpreter: "cpython", cpython: "", pypy: "" };
+export const DEFAULT_PYTHON_SETTINGS: PythonSettings = {
+  interpreter: "cpython",
+  cpython: "",
+  pypy: "",
+  formatOnSave: true,
+  ruff: "",
+};
+
+// 設定の画面で変える Python の項目（処理系と、⌘S で整形するか。パスは settings.json で書く）
+export type PythonChoice = { interpreter: Interpreter; formatOnSave: boolean };
+
+export function pythonChoiceOf(python: PythonSettings): PythonChoice {
+  return { interpreter: python.interpreter, formatOnSave: python.formatOnSave };
+}
 
 // 選べる処理系と、画面に出す名前（ジャッジの言語の名前に合わせる）
 export const INTERPRETERS: { value: Interpreter; label: string }[] = [
@@ -188,7 +208,7 @@ export function saveSettings(
   notify: NotifySettings,
   atcoderProblems: AtcoderProblemsSettings,
   problem: ProblemSettings,
-  interpreter: Interpreter,
+  python: PythonChoice,
   standings: StandingsSettings,
 ): Promise<SaveSettingsOutcome> {
   return invoke<SaveSettingsOutcome>("save_settings", {
@@ -198,7 +218,8 @@ export function saveSettings(
     notify,
     atcoderProblems,
     problem,
-    interpreter,
+    interpreter: python.interpreter,
+    formatOnSave: python.formatOnSave,
     standings,
   });
 }
