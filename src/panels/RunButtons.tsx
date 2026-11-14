@@ -6,6 +6,8 @@ type Props = {
   run: ButtonView;
   test: ButtonView;
   random: ButtonView;
+  // 計算量（Phase 45。D-270）
+  complexity: ButtonView;
   interactive: ButtonView;
   debug: ButtonView;
   // 「提出」（Phase 6。D-148 §2.2）。「デバッグ」の右に、少し間をあけて置く
@@ -19,6 +21,7 @@ type Props = {
   onRun: () => void;
   onTest: () => void;
   onRandom: () => void;
+  onComplexity: () => void;
   onInteractive: () => void;
   onDebug: () => void;
   onDebugAction: (action: StepAction) => void;
@@ -62,13 +65,14 @@ function RunButton({
   );
 }
 
-// ボタンゾーンの「実行」「サンプルテスト」「ランダムテスト」「対話テスト」「デバッグ」「提出」（D-044・D-100・D-143・D-144・D-146・D-148）。
+// ボタンゾーンの「実行」「サンプルテスト」「ランダムテスト」「対話テスト」「計算量」「デバッグ」「提出」（D-044・D-100・D-143・D-144・D-270・D-146・D-148）。
 // デバッグ中は「デバッグ」の位置に、続行／一時停止・ステップオーバー・ステップイン・ステップアウト・停止を並べる
 function RunButtons({
   run,
   test,
   random,
   interactive,
+  complexity,
   debug,
   submit,
   submitLabel,
@@ -78,6 +82,7 @@ function RunButtons({
   onTest,
   onRandom,
   onInteractive,
+  onComplexity,
   onDebug,
   onDebugAction,
   onDebugStop,
@@ -96,6 +101,11 @@ function RunButtons({
       <RunButton view={test} hint={hint(test, "test")} onClick={onTest} />
       <RunButton view={random} hint={hint(random, null)} onClick={onRandom} />
       <RunButton view={interactive} hint={hint(interactive, null)} onClick={onInteractive} />
+      <RunButton
+        view={complexity}
+        hint={`${hint(complexity, null)}・生成器に大きさの割合を渡し、解答の時間の伸び方を測ります`}
+        onClick={onComplexity}
+      />
       {debugging ? (
         <span className="debug-buttons" role="group" aria-label="デバッグの操作">
           <RunButton

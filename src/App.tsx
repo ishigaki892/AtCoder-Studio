@@ -45,6 +45,7 @@ import PaneBoundary from "./layout/PaneBoundary";
 import type { Command } from "./keybindings";
 import { applyAppearance } from "./appearance";
 import Editor, {
+  activeEditorTarget,
   remeasureEditor,
   toggleBreakpointAtCursor,
   type Reveal,
@@ -109,6 +110,7 @@ import {
 } from "./editor/lsp";
 import type { TestState } from "./panels/TestResults";
 import {
+  startComplexity,
   startInteractive,
   startRandom,
   startRun,
@@ -139,6 +141,9 @@ import { copyText } from "./panels/copyText";
 import { askRestartPackage, cancelReservation, copySource, createRandomPrograms, restartPackage } from "./ipc/scaffold";
 import { problemMarks, setProblemMark, setProblemMemo, setProblemRetry, type ProblemMarks, type SolvedBy } from "./ipc/problemMarks";
 import MemoPanel from "./panels/MemoPanel";
+import LibraryView from "./sidebar/LibraryView";
+import { addLibraryDependency, planLibraryInsert, type Library, type LibraryItem } from "./ipc/library";
+import { isCppPath, isPythonPath } from "./editor/language";
 import { joiKindOf, type JoiKind } from "./ipc/atcoderProblems";
 import {
   atcoderLogin,
@@ -250,6 +255,24 @@ function MemoIcon() {
   );
 }
 
+// アクティビティバーの「ライブラリ」（Phase 46。D-271）。開いた本
+function LibraryIcon() {
+  return (
+    <svg
+      width="24"
+      height="24"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      aria-hidden="true"
+    >
+      <path d="M12 6.5C10 5 7 4.5 3.5 5v13c3.5-.5 6.5 0 8.5 1.5 2-1.5 5-2 8.5-1.5V5C17 4.5 14 5 12 6.5z" />
+      <path d="M12 6.5v13" />
+    </svg>
+  );
+}
+
 // アクティビティバーの下端の「設定」（Phase 8 作業 6。D-159）。歯車
 function SettingsIcon() {
   return (
@@ -308,8 +331,8 @@ const EXTRA_LABELS: Record<ExtraKind, string> = { past: "過去問", settings: "
 // 横幅を変えられる列（ファイル一覧・右列）の状態
 type ColumnState = { width: number; visible: boolean };
 // サイドバーの中身（Phase 12 作業 1。D-182）。エクスプローラー（ファイル一覧）・検索・実行とデバッグ・
-// コンテスト（Phase 18 作業 4。D-218）・メモ（Phase 39。D-263）
-type SidebarView = "files" | "search" | "debug" | "contest" | "memo";
+// コンテスト（Phase 18 作業 4。D-218）・メモ（Phase 39。D-263）・ライブラリ（Phase 46。D-271）
+type SidebarView = "files" | "search" | "debug" | "contest" | "memo" | "library";
 // command は、マウスを乗せたときにキーを出すのに使う（D-245）
 const SIDEBAR_VIEWS: { view: SidebarView; label: string; command: Command }[] = [
   { view: "files", label: "エクスプローラー", command: "showExplorer" },
@@ -317,6 +340,7 @@ const SIDEBAR_VIEWS: { view: SidebarView; label: string; command: Command }[] = 
   { view: "debug", label: "実行とデバッグ", command: "showDebug" },
   { view: "contest", label: "コンテスト", command: "showContest" },
   { view: "memo", label: "メモ", command: "showMemo" },
+  { view: "library", label: "ライブラリ", command: "showLibrary" },
 ];
 function SidebarIcon({ view }: { view: SidebarView }) {
   switch (view) {
@@ -330,8 +354,21 @@ function SidebarIcon({ view }: { view: SidebarView }) {
       return <ContestIcon />;
     case "memo":
       return <MemoIcon />;
+    case "library":
+      return <LibraryIcon />;
   }
 }
+// エディタのタブの言語（ライブラリの一覧の言語に使う。Phase 46。D-271）
+function editorLanguageOf(path: string): "rust" | "cpp" | "python" | null {
+  if (isCppPath(path)) {
+    return "cpp";
+  }
+  if (isPythonPath(path)) {
+    return "python";
+  }
+  return path.endsWith(".rs") ? "rust" : null;
+}
+
 function sidebarViewOf(value: string): SidebarView {
   return SIDEBAR_VIEWS.find((item) => item.view === value)?.view ?? "files";
 }
@@ -766,11 +803,11 @@ function App() {
   // デバッグ（Phase 5 作業 2。D-146）は、dev でビルドして lldb-dap で動かす。出力と経過は実行ログに出す
   // debugCase は、デバッグの標準入力にするケース（テスト結果の「このケースをデバッグ」。D-146 2.4）
   async function handleStart(
-    kind: "run" | "test" | "random" | "interactive" | "debug",
+    kind: "run" | "test" | "random" | "interactive" | "complexity" | "debug",
     cases?: string[],
     debugCase?: string,
   ) {
-    const test = kind === "test" || kind === "random" || kind === "interactive";
+    const test = kind === "test" || kind === "random" || kind === "interactive" || kind === "complexity";
     if (runningRef.current) {
       stopRequestedRef.current = true;
       void stopRun();
@@ -794,7 +831,9 @@ function App() {
             ? "randomTesting"
             : kind === "interactive"
               ? "interactiveTesting"
-              : "debugging",
+              : kind === "complexity"
+                ? "measuring"
+                : "debugging",
     );
     // 未保存のタブを保存してから始める（D-089）。保存できないか、その間に止められたら始めない
     if (!(await tabs.saveAll()) || stopRequestedRef.current) {
@@ -820,8 +859,16 @@ function App() {
         cases: cases && state ? state.cases : [],
         running: null,
         summary: null,
-        mode: kind === "random" ? "random" : kind === "interactive" ? "interactive" : "sample",
+        mode:
+          kind === "random"
+            ? "random"
+            : kind === "interactive"
+              ? "interactive"
+              : kind === "complexity"
+                ? "complexity"
+                : "sample",
         progress: null,
+        complexity: kind === "complexity" ? { steps: [], result: null } : undefined,
       }));
     }
     // デバッグを始めると、デバッグコンソールを前に出す（D-146 2.8）
@@ -834,6 +881,15 @@ function App() {
         setDiagnostics(event.items);
       } else if (event.type === "caseStarted") {
         setTestState((state) => state && { ...state, running: event.name });
+      } else if (event.type === "complexityStep") {
+        const step = event.step;
+        setTestState(
+          (state) =>
+            state && {
+              ...state,
+              complexity: { steps: [...(state.complexity?.steps ?? []), step], result: null },
+            },
+        );
       } else if (event.type === "randomProgress") {
         const progress = { index: event.index, total: event.total, seed: event.seed };
         setTestState((state) => state && { ...state, progress });
@@ -865,7 +921,18 @@ function App() {
         if (test) {
           const compileError = finish.kind === "compileError";
           setTestState(
-            (state) => state && { ...state, running: null, progress: null, summary, compileError },
+            (state) =>
+              state && {
+                ...state,
+                running: null,
+                progress: null,
+                summary,
+                compileError,
+                complexity:
+                  finish.kind === "measured"
+                    ? { steps: finish.steps, result: finish }
+                    : state.complexity,
+              },
           );
         }
         if (event.finish.kind === "compileError") {
@@ -879,6 +946,8 @@ function App() {
     try {
       if (kind === "random") {
         await startRandom(runOn, onEvent);
+      } else if (kind === "complexity") {
+        await startComplexity(runOn, onEvent);
       } else if (kind === "debug") {
         const breakpoints = allBreakpoints().map(({ path, entries }) => ({
           path,
@@ -1142,6 +1211,95 @@ function App() {
     } catch (e) {
       showError(String(e));
     }
+  }
+
+  // サイドバーの「ライブラリ」の「入れる」（Phase 46。D-271）。開いている作業領域のファイル（同じ言語）に、#include・import・use の
+  // 行をエディタの変更として入れる（⌘Z で戻せる）。Rust は先に、Cargo.toml に依存がなければ確かめてから足す。結果の知らせを返す
+  async function insertLibrary(library: Library, item: LibraryItem | null): Promise<string> {
+    const label = library.language === "cpp" ? "C++" : library.language === "rust" ? "Rust" : "Python";
+    const target = activeEditorTarget();
+    const path = target?.key ?? null;
+    if (
+      !target ||
+      !path ||
+      path !== tabs.activePath ||
+      isReadOnlyKey(path) ||
+      isAppKey(path) ||
+      editorLanguageOf(path) !== library.language
+    ) {
+      return `入れる先の ${label} のファイル（作業領域の中のもの）をエディタで開いてから押してください`;
+    }
+    const line = item?.insert ?? library.insert;
+    let added: string | null = null;
+    if (library.language === "rust" && library.crate) {
+      // 開いている Cargo.toml に保存していない変更があれば、先に保存する（Rust 側が書くファイルと食い違わないように）
+      const dirtyManifest = tabs.tabs.find(
+        (tab) => tab.dirty && tab.path.endsWith("Cargo.toml") && path.startsWith(tab.path.slice(0, -"Cargo.toml".length)),
+      );
+      if (dirtyManifest && !(await tabs.save(dirtyManifest.path))) {
+        return `${dirtyManifest.path} を保存できないので、入れませんでした`;
+      }
+      const result = await addLibraryDependency(path, library.crate);
+      if (result.status === "cancelled") {
+        return "入れるのをやめました";
+      }
+      if (result.status === "added") {
+        added = result.manifest;
+        if (tabs.stateOf(result.manifest)) {
+          await tabs.reload(result.manifest);
+        }
+        // rust-analyzer に、新しい依存を読ませる
+        restartRustAnalyzer();
+      }
+    }
+    // 確かめの窓の間にタブが変わっていれば入れない
+    const now = activeEditorTarget();
+    if (!now || now.key !== path) {
+      return `${added ? `${added} に依存を足しました。` : ""}入れる先のファイルが変わったので、「${line}」は入れませんでした`;
+    }
+    const text = now.view.state.doc.toString();
+    const plan = await planLibraryInsert(library.language, text, line);
+    const view = activeEditorTarget()?.view;
+    if (!view || view !== now.view || view.state.doc.toString() !== text) {
+      return "入れる間にファイルが変わったので、入れませんでした。もう一度押してください";
+    }
+    if (plan.already) {
+      return `${added ? `${added} に依存を足しました。` : ""}「${line}」はもう入っています`;
+    }
+    const doc = view.state.doc;
+    const change =
+      plan.line < doc.lines
+        ? { from: doc.line(plan.line + 1).from, insert: `${line}\n` }
+        : { from: doc.length, insert: `\n${line}` };
+    view.dispatch({ changes: change, scrollIntoView: true, userEvent: "input" });
+    view.focus();
+    return `${added ? `${added} に依存を足しました。` : ""}「${line}」を ${plan.line + 1} 行目に入れました（⌘Z で戻せます）`;
+  }
+
+  // サイドバーの「ライブラリ」の「開く」・中の名前（Phase 46。D-271）。自作のライブラリはアプリのフォルダのタブ（書ける。D-247 と同じ）、
+  // AC Library は読み取り専用のタブ（D-210）。中の名前なら、その行へ移る。開けなければ理由を返す
+  async function openLibrary(library: Library, item: LibraryItem | null): Promise<string | null> {
+    setError(null);
+    setExtraActive(null);
+    let key: string;
+    if (library.uri) {
+      const reason = await tabs.openReadOnly(library.uri);
+      if (reason !== null) {
+        return reason;
+      }
+      key = library.uri;
+    } else {
+      key = appKey(item?.path ?? library.path);
+      await tabs.open(key);
+      if (!tabs.stateOf(key)) {
+        return null;
+      }
+    }
+    if (item) {
+      revealSeq.current += 1;
+      setReveal({ key, line: item.line, column: null, seq: revealSeq.current });
+    }
+    return null;
   }
 
   // ブレークポイントの一覧で押した行を開く
@@ -1560,6 +1718,8 @@ function App() {
       showSidebarView("contest");
     } else if (command === "showMemo") {
       showSidebarView("memo");
+    } else if (command === "showLibrary") {
+      showSidebarView("library");
     }
   }
 
@@ -2062,6 +2222,16 @@ function App() {
             />
           </PaneBoundary>
         </div>
+        <div className="sidebar-view" hidden={sidebarView !== "library"}>
+          <PaneBoundary name="ライブラリ">
+            <LibraryView
+              visible={sidebar.visible && sidebarView === "library"}
+              activeLanguage={tabs.activePath ? editorLanguageOf(tabs.activePath) : null}
+              onInsert={insertLibrary}
+              onOpen={openLibrary}
+            />
+          </PaneBoundary>
+        </div>
         {error && (
           <div className="sidebar-error" role="alert">
             {error}
@@ -2098,6 +2268,7 @@ function App() {
           run={buttons.run}
           test={buttons.test}
           random={buttons.random}
+          complexity={buttons.complexity}
           interactive={buttons.interactive}
           debug={buttons.debug}
           submit={submitView}
@@ -2109,6 +2280,7 @@ function App() {
           onRun={() => void handleStart("run")}
           onTest={() => void handleStart("test")}
           onRandom={() => void handleStart("random")}
+          onComplexity={() => void handleStart("complexity")}
           onInteractive={() => void handleStart("interactive")}
           onDebug={() => void handleStart("debug")}
           onDebugAction={(action: StepAction) => debug.step(action)}

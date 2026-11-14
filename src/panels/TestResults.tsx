@@ -1,3 +1,5 @@
+import ComplexityView from "./ComplexityView";
+import type { ComplexityStep, Measured } from "../ipc/run";
 import { useState } from "react";
 import type { CaseResult, Interaction, Verdict } from "../ipc/run";
 import { failedNames } from "./testCases";
@@ -13,8 +15,11 @@ export type TestState = {
   summary: string | null;
   // コンパイルエラーで終わった（CE。D-140）
   compileError?: boolean;
-  // この結果を出した処理：サンプルテスト、ランダムテスト（Phase 4b 作業 3。D-143）、対話テスト（Phase 4c 作業 2。D-144）
-  mode: "sample" | "random" | "interactive";
+  // この結果を出した処理：サンプルテスト、ランダムテスト（Phase 4b 作業 3。D-143）、対話テスト（Phase 4c 作業 2。D-144）、
+  // 計算量（Phase 45。D-270）
+  mode: "sample" | "random" | "interactive" | "complexity";
+  // 計算量の段（測るたびに足す）と、終わったときの結果
+  complexity?: { steps: ComplexityStep[]; result: Measured | null };
   // ランダムテストの今の回（実行中だけ入る）
   progress: { index: number; total: number; seed: number } | null;
 };
@@ -411,6 +416,25 @@ function TestResults({
   onSaveExpected,
   notice,
 }: { state: TestState; notice: string | null } & RunProps) {
+  if (state.mode === "complexity") {
+    return (
+      <div className="test-results">
+        {state.compileError ? (
+          <div className="test-summary">
+            <VerdictBadge code="CE" tone="ng" />
+            <span className="case-verdict-text">コンパイルエラー（実行していません。エラー一覧を見てください）</span>
+          </div>
+        ) : (
+          <ComplexityView
+            steps={state.complexity?.steps ?? []}
+            result={state.complexity?.result ?? null}
+            summary={state.summary}
+          />
+        )}
+        {notice && <div className="test-notice">{notice}</div>}
+      </div>
+    );
+  }
   const failed = failedNames(state.cases);
   const random = state.mode === "random";
   // 押せない理由：実行できない状態の理由が先、なければ失敗したケースがないこと

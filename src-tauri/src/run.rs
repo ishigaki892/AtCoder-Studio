@@ -198,6 +198,8 @@ pub enum Finish {
         // 停止の操作（またはアプリの終了）で止めた
         stopped: bool,
     },
+    // 計算量を測った（Phase 45。D-270）。実行履歴には残さない。大きいので箱に入れる
+    Measured(Box<crate::complexity::Measured>),
     // AtCoder に提出した（Phase 6 作業 2。D-147・D-148）。実行履歴の「提出」に残す。
     // ほかの終わり方より大きいので、箱に入れる（JSON の形は、ほかと同じく kind と項目が並ぶ）
     Submitted(Box<SubmittedRecord>),
@@ -285,6 +287,10 @@ pub enum RunEvent {
     // デバッグの知らせ（Phase 5 作業 1。D-146）
     Debug {
         event: crate::debug::DebugEvent,
+    },
+    // 計算量の 1 段の結果（Phase 45。D-270）
+    ComplexityStep {
+        step: crate::complexity::Step,
     },
     Finished {
         finish: Finish,
@@ -1527,6 +1533,29 @@ pub fn start_random(
     let guard = RunGuard(control);
     let finish =
         crate::random::random_target(&dir, &root, &target, &langs, start_seed, &cancel, &channel);
+    drop(guard);
+    send(
+        &channel,
+        RunEvent::Finished {
+            finish: finish.clone(),
+        },
+    );
+    Ok(finish)
+}
+
+// 計算量を測り始め、終わるまで待つ（Phase 45。D-270）。dir はパッケージのディレクトリ（作業領域の中で確かめ済み）
+pub fn start_complexity(
+    dir: PathBuf,
+    target: Target,
+    langs: LangSettings,
+    start_seed: u64,
+    control: &RunControl,
+    channel: Channel<RunEvent>,
+) -> Result<Finish, String> {
+    let cancel = control.begin()?;
+    let guard = RunGuard(control);
+    let finish =
+        crate::complexity::complexity_target(&dir, &target, &langs, start_seed, &cancel, &channel);
     drop(guard);
     send(
         &channel,

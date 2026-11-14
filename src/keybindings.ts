@@ -27,7 +27,9 @@ export type Command =
   // サイドバーの「コンテスト」（2026-11-02、ユーザーの依頼。D-245）
   | "showContest"
   // サイドバーの「メモ」（Phase 39。D-263）
-  | "showMemo";
+  | "showMemo"
+  // サイドバーの「ライブラリ」（Phase 46。D-271）
+  | "showLibrary";
 
 export const COMMANDS: Command[] = [
   "toggleSidebar",
@@ -52,6 +54,7 @@ export const COMMANDS: Command[] = [
   "showDebug",
   "showContest",
   "showMemo",
+  "showLibrary",
 ];
 
 // コマンドの名前（知らせ・設定の画面で使う。docs/usage.md の「キーの割り当て」の表と同じ）
@@ -78,6 +81,7 @@ export const COMMAND_LABELS: Record<Command, string> = {
   showDebug: "実行とデバッグ",
   showContest: "コンテスト",
   showMemo: "メモ",
+  showLibrary: "ライブラリ",
 };
 
 export type KeyBinding = {
@@ -126,6 +130,8 @@ export const DEFAULT_KEY_BINDINGS: KeyBinding[] = [
   { command: "showContest", key: "c", meta: true, ctrl: false, alt: false, shift: true },
   // ⇧⌘M サイドバーの「メモ」（Phase 39。D-263）
   { command: "showMemo", key: "m", meta: true, ctrl: false, alt: false, shift: true },
+  // ⇧⌘B サイドバーの「ライブラリ」（Phase 46。D-271）
+  { command: "showLibrary", key: "b", meta: true, ctrl: false, alt: false, shift: true },
 ];
 
 let keyBindings: KeyBinding[] = DEFAULT_KEY_BINDINGS;

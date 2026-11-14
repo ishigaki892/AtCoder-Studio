@@ -5,9 +5,12 @@
 // - なければ、今までの「外のエディタで開く」と同じく、既定の中身で作ってから開く
 // - 読み書きの決まり（1 MB まで・UTF-8・外での変更の確かめ・直接の上書き）は、作業領域のファイルと同じ（workspace.rs）。
 //   シンボリックリンクなら、リンクの先を読み書きする（C-7 と同じ扱い）
+// - 自作のライブラリのファイル（libraries/cpp/・libraries/rust/・libraries/python/ の中のソース。Phase 46。D-271）も開ける。
+//   こちらは作らない。外を指すリンク・`..` は拒む（library::locate_file）
 use std::path::{Path, PathBuf};
 
 use crate::language::Language;
+use crate::library;
 use crate::snippets;
 use crate::storage;
 use crate::workspace::{self, ReadResult, Stamp, WriteResult};
@@ -40,7 +43,16 @@ fn ensure(dir: &Path, name: &str) -> Result<PathBuf, String> {
     }
 }
 
+// 自作のライブラリのファイルなら、その場所
+fn library_file(dir: &Path, name: &str) -> Option<Result<PathBuf, String>> {
+    name.starts_with("libraries/")
+        .then(|| library::locate_file(dir, name).ok_or_else(|| format!("「{name}」は開けません")))
+}
+
 pub fn read(dir: &Path, name: &str) -> Result<ReadResult, String> {
+    if let Some(path) = library_file(dir, name) {
+        return workspace::read_text_at(&path?);
+    }
     workspace::read_text_at(&ensure(dir, name)?)
 }
 
@@ -51,6 +63,9 @@ pub fn write(
     content: &str,
     expected: Option<&Stamp>,
 ) -> Result<WriteResult, String> {
+    if let Some(path) = library_file(dir, name) {
+        return workspace::write_existing_at(&path?, content, expected);
+    }
     let (path, _) = locate(dir, name)?;
     workspace::write_existing_at(&path, content, expected)
 }
@@ -60,7 +75,10 @@ pub fn stamps(dir: &Path, names: &[String]) -> Vec<Option<Stamp>> {
     names
         .iter()
         .map(|name| {
-            let (path, _) = locate(dir, name).ok()?;
+            let path = match library_file(dir, name) {
+                Some(path) => path.ok()?,
+                None => locate(dir, name).ok()?.0,
+            };
             path.is_file()
                 .then(|| workspace::stamp_of(&path).ok())
                 .flatten()
@@ -109,6 +127,35 @@ mod tests {
         }
         assert!(!dir.0.join("state.json").exists());
         assert_eq!(stamps(&dir.0, &["state.json".to_string()]), vec![None]);
+    }
+
+    #[test]
+    fn opens_library_files() {
+        let dir = TempDir::new("library");
+        fs::create_dir_all(dir.0.join("libraries/cpp")).unwrap();
+        fs::write(dir.0.join("libraries/cpp/seg.hpp"), "struct Seg {};\n").unwrap();
+        let name = "libraries/cpp/seg.hpp";
+        let read_back = read(&dir.0, name).unwrap();
+        assert_eq!(read_back.content, "struct Seg {};\n");
+        assert!(matches!(
+            write(&dir.0, name, "struct Seg2 {};\n", Some(&read_back.stamp)).unwrap(),
+            WriteResult::Saved { .. }
+        ));
+        assert_eq!(
+            fs::read_to_string(dir.0.join(name)).unwrap(),
+            "struct Seg2 {};\n"
+        );
+        assert!(stamps(&dir.0, &[name.to_string()])[0].is_some());
+        // ないファイルは作らない・ほかの場所は開かない
+        for name in [
+            "libraries/cpp/new.hpp",
+            "libraries/ac-library/atcoder/dsu.hpp",
+            "libraries/cpp/../x.hpp",
+        ] {
+            assert!(read(&dir.0, name).is_err(), "{name}");
+            assert!(write(&dir.0, name, "x", None).is_err(), "{name}");
+        }
+        assert!(!dir.0.join("libraries/cpp/new.hpp").exists());
     }
 
     #[test]

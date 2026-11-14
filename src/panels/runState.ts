@@ -8,6 +8,8 @@ export type RunState =
   | "testing"
   | "randomTesting"
   | "interactiveTesting"
+  // 計算量を測っている（Phase 45。D-270）
+  | "measuring"
   | "debugging";
 
 // デバッグ中の段階：ビルド・起動の途中、プログラムが動いている、止まっている
@@ -47,6 +49,7 @@ export function runButtons(
   test: ButtonView;
   random: ButtonView;
   interactive: ButtonView;
+  complexity: ButtonView;
   debug: ButtonView;
 } {
   // 動いている処理のボタンだけが「停止」になり、ほかは押せない
@@ -64,6 +67,10 @@ export function runButtons(
       label: active === "interactiveTesting" ? "停止" : "対話テスト",
       disabledReason: active === "interactiveTesting" ? null : BUSY,
     },
+    complexity: {
+      label: active === "measuring" ? "停止" : "計算量",
+      disabledReason: active === "measuring" ? null : BUSY,
+    },
     // デバッグ中は、このボタンの代わりにデバッグの操作のボタンを並べる（debugButtons）
     debug: { label: "デバッグ", disabledReason: BUSY },
   });
@@ -76,6 +83,7 @@ export function runButtons(
     test: { label: "サンプルテスト", disabledReason: reason },
     random: { label: "ランダムテスト", disabledReason: reason },
     interactive: { label: "対話テスト", disabledReason: reason },
+    complexity: { label: "計算量", disabledReason: reason },
     debug: { label: "デバッグ", disabledReason: reason },
   };
 }

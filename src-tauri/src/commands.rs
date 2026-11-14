@@ -690,6 +690,39 @@ pub async fn start_random(
     Ok(())
 }
 
+// 計算量の見当（Phase 45。D-270）。ビルドして、生成器に大きさの割合を渡して解答の時間とメモリを測る。終わるまで返らない。
+// 解答・生成器は利用者のコードなので、信頼していない作業領域では拒否する（D-128）。実行履歴には残さない
+#[tauri::command]
+pub async fn start_complexity(
+    target: Target,
+    on_event: tauri::ipc::Channel<RunEvent>,
+    app: AppHandle,
+    workspace: State<'_, Workspace>,
+) -> Result<(), String> {
+    let root = workspace.trusted_root()?;
+    let dir = package_dir(&root, &target)?;
+    let langs = lang_settings_of(&app);
+    let time_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as u64)
+        .unwrap_or(0);
+    let start_seed = time_ms % run::SEED_RANGE;
+    let runner = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        run::start_complexity(
+            dir,
+            target,
+            langs,
+            start_seed,
+            &runner.state::<RunControl>(),
+            on_event,
+        )
+    })
+    .await
+    .map_err(|_| "実行できません".to_string())??;
+    Ok(())
+}
+
 // 対話テスト（Phase 4c 作業 1。D-144）。ビルドして、解答とジャッジをつないでケースごとに動かす。終わるまで返らない。
 // cases は、実行するケースの名前（`interactive-N`。1 ケースだけ・失敗したケースだけの再実行）。経過は on_event で送る。
 // 終わったら、結果を実行履歴に残す。解答・ジャッジは利用者のコードなので、信頼していない作業領域では拒否する（D-128）
@@ -2706,6 +2739,106 @@ pub fn rust_library_lines(app: AppHandle) -> Result<RustLibraryLines, String> {
             .into_owned(),
         lines: crate::rust_bundle::dependency_lines(&app_folder),
     })
+}
+
+// 自作のライブラリの一覧（Phase 46。D-271）。アプリのフォルダの libraries/ の中だけを読む。コードは動かさないので、信頼は問わない
+#[tauri::command]
+pub async fn list_libraries(app: AppHandle) -> Result<crate::library::Libraries, String> {
+    let dir = app_dir(&app)?;
+    tauri::async_runtime::spawn_blocking(move || crate::library::list(&dir))
+        .await
+        .map_err(|_| "ライブラリの一覧を読めません".to_string())
+}
+
+// text（エディタの中身）のどこに line（`#include`・`import`・`use` の行）を入れるか（Phase 46。D-271）。
+// 画面がエディタの変更として入れる（⌘Z で戻せる）。ファイルは読み書きしない
+#[tauri::command]
+pub fn plan_library_insert(
+    language: Language,
+    text: String,
+    line: String,
+) -> Result<crate::library::InsertPlan, String> {
+    if text.len() as u64 > crate::workspace::MAX_FILE_SIZE {
+        return Err("ファイルが大きすぎます".to_string());
+    }
+    Ok(crate::library::plan_insert(language, &text, &line))
+}
+
+// Rust の自作のライブラリを入れるときの、Cargo.toml の依存（Phase 46。D-271）
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryDependency {
+    // added：足した、present：もうあった、cancelled：確かめの窓でやめた
+    status: &'static str,
+    // Cargo.toml の、作業領域のルートからの相対パス
+    manifest: String,
+}
+
+// path（作業領域の .rs）の上の、いちばん近い Cargo.toml の [dependencies] に krate がなければ、確かめてから足す。
+// 作業領域のファイルを書くだけで、コードは動かさないので、信頼は問わない（D-271）
+#[tauri::command]
+pub async fn add_library_dependency(
+    path: String,
+    krate: String,
+    app: AppHandle,
+    workspace: State<'_, Workspace>,
+) -> Result<LibraryDependency, String> {
+    let root = workspace.root()?;
+    let dir = app_dir(&app)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let file = resolve(&root, &path).map_err(|error| error.to_string())?;
+        let package = file
+            .ancestors()
+            .skip(1)
+            .take_while(|dir| dir.starts_with(&root))
+            .find(|dir| dir.join("Cargo.toml").is_file())
+            .ok_or_else(|| "このファイルの上に Cargo.toml がありません".to_string())?
+            .to_path_buf();
+        let manifest_path = package.join("Cargo.toml");
+        let manifest = manifest_path
+            .strip_prefix(&root)
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| "Cargo.toml".to_string());
+        let current = crate::workspace::read_text_at(&manifest_path)?;
+        if crate::library::has_dependency(&current.content, &krate) {
+            return Ok(LibraryDependency {
+                status: "present",
+                manifest,
+            });
+        }
+        let line = crate::library::dependency_line(&dir, &krate)
+            .ok_or_else(|| format!("libraries/rust/ にクレート「{krate}」がありません"))?;
+        let ok = app
+            .dialog()
+            .message(format!(
+                "{manifest} の [dependencies] に、次の行を足します。\n\n{line}"
+            ))
+            .title("ライブラリを入れる")
+            .kind(MessageDialogKind::Info)
+            .buttons(MessageDialogButtons::OkCancelCustom(
+                "足す".to_string(),
+                "やめる".to_string(),
+            ))
+            .blocking_show();
+        if !ok {
+            return Ok(LibraryDependency {
+                status: "cancelled",
+                manifest,
+            });
+        }
+        let next = crate::library::add_dependency(&current.content, &line);
+        match crate::workspace::write_existing_at(&manifest_path, &next, Some(&current.stamp))? {
+            crate::workspace::WriteResult::Saved { .. } => Ok(LibraryDependency {
+                status: "added",
+                manifest,
+            }),
+            crate::workspace::WriteResult::Conflict => Err(format!(
+                "{manifest} が、確かめている間に変わったので、書きませんでした。もう一度押してください"
+            )),
+        }
+    })
+    .await
+    .map_err(|_| "Cargo.toml に依存を足せません".to_string())?
 }
 
 // 「コードをコピーして公式の提出ページを開く」でコピーする中身（D-148 §2.5）。提出と同じく、C++ は `#include "…"`（D-248。

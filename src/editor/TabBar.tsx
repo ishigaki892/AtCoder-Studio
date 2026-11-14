@@ -57,6 +57,10 @@ function label(tab: Tab, tabs: Tab[]) {
   }
   // アプリのフォルダのファイル（D-247）：作業領域に同じ名前のファイルのタブがあれば「アプリのフォルダ」を添える
   if (isAppKey(tab.path)) {
+    // 自作のライブラリのファイル（libraries/…。Phase 46。D-271）は、ファイルの名前と「ライブラリ」
+    if (appName(tab.path).startsWith("libraries/")) {
+      return { name: baseName(tab.path), folder: "ライブラリ" };
+    }
     const name = appName(tab.path);
     const same = tabs.some((t) => t !== tab && !t.readOnly && !isAppKey(t.path) && baseName(t.path) === name);
     return { name, folder: same ? "アプリのフォルダ" : null };

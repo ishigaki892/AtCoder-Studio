@@ -2,6 +2,7 @@ mod app_files;
 mod atcoder_problems;
 mod commands;
 mod compare;
+mod complexity;
 mod cpp;
 mod cpp_expand;
 mod debug;
@@ -13,6 +14,7 @@ mod input_gen;
 mod input_py;
 mod interactive;
 mod language;
+mod library;
 mod lsp;
 mod menu;
 mod notify;
@@ -160,6 +162,9 @@ pub fn run() {
             commands::open_rust_library_folder,
             commands::rust_library_lines,
             commands::open_python_library_folder,
+            commands::list_libraries,
+            commands::plan_library_insert,
+            commands::add_library_dependency,
             commands::copy_source,
             commands::make_input,
             commands::fill_cpp_input,
@@ -174,6 +179,7 @@ pub fn run() {
             commands::resolve_target,
             commands::start_run,
             commands::start_random,
+            commands::start_complexity,
             commands::start_interactive,
             commands::stop_run,
             commands::start_debug,

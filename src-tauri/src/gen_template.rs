@@ -7,6 +7,9 @@
 //   （下限が負なら −10〜10。上限の数が小さければその数まで。上限が先に出てきた変数ならその値まで）、
 //   実数は下限〜下限+10 の小数 2 桁、文字は制約の選択肢か英小文字 a〜c、文字列の長さは 1〜8
 // - 「相異なる」などの制約は満たさず、頭のコメントに書く。クエリ・読めない行は、そこまで作ってコメントを残す
+// - 2 つ目の引数（0 より大きく 1 以下の割合）があれば、計算量を測るための大きな入力を作る（Phase 45。D-270）。
+//   長さ・個数と 1 つで書かれた整数（N・K など）は「制約の上限 × 割合」（下限より小さければ下限）、配列などの
+//   ほかの整数は制約の範囲いっぱい、文字列の長さも「長さの上限 × 割合」。上限が読めないものは小さいまま。テストケースの数は下限にする（総和の制約で大きくなりすぎるため）
 use std::collections::{HashMap, HashSet};
 
 use crate::input_gen::{self, Field, Shape, ShapeItem, ShapeLen, ShapeValue, Upper};
@@ -21,6 +24,9 @@ enum Range {
         lo: i128,
         cap: Option<i128>,
         var: Option<String>,
+        // 大きさを測るとき（D-270）の下限と上限（制約のまま。上限が読めなければ None）
+        low: i128,
+        limit: Option<i128>,
     },
     Real {
         lo: i128,
@@ -39,8 +45,8 @@ const RESERVED: &[&str] = &[
     "elif", "except", "from", "global", "import", "lambda", "nonlocal", "pass", "raise", "with",
     "none", "int", "long", "double", "float", "char", "string", "auto", "bool", "case", "class",
     "default", "delete", "new", "this", "throw", "void", "switch", "union", "signed", "unsigned",
-    "short", "rng", "rint", "rreal", "rpick", "rword", "main", "seed", "sys", "random", "print",
-    "min", "max", "range", "std", "cout", "argc", "argv", "len", "out",
+    "short", "rng", "rint", "rreal", "rpick", "rword", "rspan", "scale", "main", "seed", "sys",
+    "random", "print", "min", "max", "range", "std", "cout", "argc", "argv", "len", "out",
 ];
 
 // 変数の名前（小文字。英数字と _ だけ。予約語なら末尾に _）
@@ -79,6 +85,8 @@ struct Writer<'a> {
     const_names: HashMap<String, String>,
     // 文字列の長さの定数を使う名前
     string_bases: HashSet<String>,
+    // テストケースの数の名前（大きさを測るときは下限にする）
+    cases_base: Option<String>,
     // 1 つの値として作った変数（問題文のままの名前 → 変数の名前。制約で使う名前 → 変数の名前）
     scalars: HashMap<String, String>,
     scalar_bases: HashMap<String, String>,
@@ -118,6 +126,7 @@ impl<'a> Writer<'a> {
             order: Vec::new(),
             const_names: HashMap::new(),
             string_bases: HashSet::new(),
+            cases_base: shape.cases.as_ref().map(|cases| cases.base.clone()),
             scalars: HashMap::new(),
             scalar_bases: HashMap::new(),
             relations: HashMap::new(),
@@ -164,12 +173,14 @@ impl<'a> Writer<'a> {
                     }
                 };
                 let mut var = None;
+                let mut limit = None;
                 // 上限が、先に作った 1 つの値でない変数（同じ行の B_i など）なら、その変数の上限をたどって使う
                 let mut upper = bound.upper.clone();
                 for step in 0..5 {
                     match upper {
                         Some(Upper::Number(number)) => {
                             cap = cap.min(number.max(lo));
+                            limit = Some(number);
                             break;
                         }
                         Some(Upper::Var(name, offset)) => {
@@ -195,7 +206,24 @@ impl<'a> Writer<'a> {
                 } else {
                     Some(cap)
                 };
-                Range::Int { lo, cap, var }
+                // 大きさを測るとき：下限は制約のまま（読めなければ小さな範囲の下限）。テストケースの数は下限だけ
+                let low = if self.counts.contains(&field.base) {
+                    lo
+                } else {
+                    bound.lower.unwrap_or(lo)
+                };
+                let limit = if self.cases_base.as_deref() == Some(field.base.as_str()) {
+                    Some(low)
+                } else {
+                    limit.filter(|limit| *limit >= low)
+                };
+                Range::Int {
+                    lo,
+                    cap,
+                    var,
+                    low,
+                    limit,
+                }
             }
             ShapeValue::Real => {
                 let lo = bound.lower.unwrap_or(0);
@@ -237,15 +265,17 @@ impl<'a> Writer<'a> {
         let rust = self.language == Language::Rust;
         match (field.value, range) {
             (_, Range::Int { cap, var, .. }) => {
+                // 範囲は main の頭で決めた lo_*・hi_*（大きさを測るときは広げる。D-270）
+                let local = local_name(&head);
                 let hi = match (cap, var) {
-                    (Some(_), Some(var)) => self.min_expr(&format!("{head}_MAX"), &var),
+                    (Some(_), Some(var)) => self.min_expr(&format!("hi_{local}"), &var),
                     (None, Some(var)) => var,
-                    _ => format!("{head}_MAX"),
+                    _ => format!("hi_{local}"),
                 };
                 if rust {
-                    format!("rng.int({head}_MIN, {hi})")
+                    format!("rng.int(lo_{local}, {hi})")
                 } else {
-                    format!("rint({head}_MIN, {hi})")
+                    format!("rint(lo_{local}, {hi})")
                 }
             }
             (_, Range::Real { .. }) => {
@@ -257,10 +287,11 @@ impl<'a> Writer<'a> {
             }
             (ShapeValue::Str, Range::Chars(_)) => {
                 self.string_bases.insert(field.base.clone());
+                let local = local_name(&head);
                 if rust {
-                    format!("rng.word({head}_CHARS, {head}_LEN_MIN, {head}_LEN_MAX)")
+                    format!("rng.word({head}_CHARS, lo_{local}_len, hi_{local}_len)")
                 } else {
-                    format!("rword({head}_CHARS, {head}_LEN_MIN, {head}_LEN_MAX)")
+                    format!("rword({head}_CHARS, lo_{local}_len, hi_{local}_len)")
                 }
             }
             (_, Range::Chars(_)) => {
@@ -431,6 +462,116 @@ impl<'a> Writer<'a> {
         }
     }
 
+    // 文字列の長さの、制約の下限と上限（大きさを測るとき。D-270）。`1 ≤ |S| ≤ 2×10^5` は S の範囲として読まれる
+    fn string_len_bounds(&self, base: &str) -> (i128, Option<i128>) {
+        let bound = self.shape.bounds.get(base).cloned().unwrap_or_default();
+        let low = bound.lower.unwrap_or(1).max(1);
+        let limit = match bound.upper {
+            Some(Upper::Number(number)) if number >= low => Some(number),
+            _ => None,
+        };
+        (low, limit)
+    }
+
+    // main の頭で、値の範囲（lo_*・hi_*）を決める行（大きさを測るときは rspan で広げる。D-270）
+    fn spans(&self) -> Vec<String> {
+        let mut lines = Vec::new();
+        let declare = |lo: &str, hi: &str, call: String| match self.language {
+            Language::Rust => format!("    let ({lo}, {hi}) = {call};"),
+            Language::Cpp => format!("    auto [{lo}, {hi}] = {call};"),
+            Language::Python => format!("    {lo}, {hi} = {call}"),
+        };
+        let call = |min: &str, max: &str, low: &str, limit: &str, count: bool| match self.language {
+            Language::Rust => format!("rspan(scale, {min}, {max}, {low}, {limit}, {count})"),
+            Language::Cpp => format!("rspan({min}, {max}, {low}, {limit}, {count})"),
+            Language::Python => format!(
+                "rspan({min}, {max}, {low}, {limit}, {})",
+                if count { "True" } else { "False" }
+            ),
+        };
+        let unused = match self.language {
+            Language::Rust | Language::Python => "_",
+            Language::Cpp => "",
+        };
+        for base in &self.order {
+            let head = &self.const_names[base];
+            let local = local_name(head);
+            match &self.ranges[base] {
+                Range::Int {
+                    lo,
+                    cap,
+                    low,
+                    limit,
+                    ..
+                } => {
+                    let min = format!("{head}_MIN");
+                    let low_name = if low != lo {
+                        format!("{head}_LOW")
+                    } else {
+                        min.clone()
+                    };
+                    // 割合で決める値：長さ・個数と、1 つで書かれた整数（入力が N だけの問題では、N の値が大きさ）。
+                    // 値どうしの関係（A < B）がまだ満たせていないものは、範囲のまま
+                    let count = self.counts.contains(base)
+                        || (self.scalar_bases.contains_key(base)
+                            && !self.relations.contains_key(base));
+                    match cap {
+                        Some(cap) => {
+                            let max = format!("{head}_MAX");
+                            let limit_name = match limit {
+                                Some(limit) if limit != cap => format!("{head}_LIMIT"),
+                                _ => max.clone(),
+                            };
+                            lines.push(declare(
+                                &format!("lo_{local}"),
+                                &format!("hi_{local}"),
+                                call(&min, &max, &low_name, &limit_name, count),
+                            ));
+                        }
+                        // 上限がほかの変数だけ：下限だけを決める
+                        None => {
+                            let hi = if unused.is_empty() {
+                                format!("hi_{local}_unused")
+                            } else {
+                                unused.to_string()
+                            };
+                            lines.push(declare(
+                                &format!("lo_{local}"),
+                                &hi,
+                                call(&min, &min, &low_name, &low_name, false),
+                            ));
+                        }
+                    }
+                }
+                Range::Chars(_) if self.string_bases.contains(base) => {
+                    let (low, limit) = self.string_len_bounds(base);
+                    let low_name = if low != 1 {
+                        format!("{head}_LEN_LOW")
+                    } else {
+                        format!("{head}_LEN_MIN")
+                    };
+                    let limit_name = match limit {
+                        Some(limit) if limit != 8 => format!("{head}_LEN_LIMIT"),
+                        _ => format!("{head}_LEN_MAX"),
+                    };
+                    lines.push(declare(
+                        &format!("lo_{local}_len"),
+                        &format!("hi_{local}_len"),
+                        call(
+                            &format!("{head}_LEN_MIN"),
+                            &format!("{head}_LEN_MAX"),
+                            &low_name,
+                            &limit_name,
+                            true,
+                        ),
+                    ));
+                }
+                _ => {}
+            }
+        }
+        lines
+    }
+
     // ファイルの頭の定数
     fn constants(&self) -> Vec<String> {
         let mut lines = Vec::new();
@@ -447,10 +588,25 @@ impl<'a> Writer<'a> {
                 Language::Python => format!("{name} = {value}.0"),
             };
             match &self.ranges[base] {
-                Range::Int { lo, cap, var } => {
+                Range::Int {
+                    lo,
+                    cap,
+                    var,
+                    low,
+                    limit,
+                } => {
                     lines.push(int(format!("{head}_MIN"), *lo));
                     if let Some(cap) = cap {
                         lines.push(int(format!("{head}_MAX"), *cap));
+                    }
+                    // 大きさを測るとき（D-270）の下限・上限。小さな範囲と同じなら書かない
+                    if low != lo {
+                        lines.push(int(format!("{head}_LOW"), *low));
+                    }
+                    if let Some(limit) = limit
+                        && Some(limit) != cap.as_ref()
+                    {
+                        lines.push(int(format!("{head}_LIMIT"), *limit));
                     }
                     if let Some(var) = var {
                         lines.push(format!(
@@ -483,12 +639,26 @@ impl<'a> Writer<'a> {
                     if self.string_bases.contains(base) {
                         lines.push(int(format!("{head}_LEN_MIN"), 1));
                         lines.push(int(format!("{head}_LEN_MAX"), 8));
+                        let (low, limit) = self.string_len_bounds(base);
+                        if low != 1 {
+                            lines.push(int(format!("{head}_LEN_LOW"), low));
+                        }
+                        if let Some(limit) = limit
+                            && limit != 8
+                        {
+                            lines.push(int(format!("{head}_LEN_LIMIT"), limit));
+                        }
                     }
                 }
             }
         }
         lines
     }
+}
+
+// 定数の頭の名前（例：N・A_）から、範囲の変数の名前の後ろ（例：n・a_）
+fn local_name(head: &str) -> String {
+    head.to_ascii_lowercase()
 }
 
 fn parenthesize(expr: &str) -> String {
@@ -506,6 +676,9 @@ fn header(comment: &str, shape: Option<&Shape>, missing: Option<&str>) -> Vec<St
             "{comment} ランダムテストの生成器の雛形（AtCoder Studio が問題文の「入力」の形式と制約から作りました）"
         ),
         format!("{comment} - seed（1 つ目の引数）から小さな入力を 1 つ作り、標準出力に書きます"),
+        format!(
+            "{comment} - 2 つ目の引数（0 より大きく 1 以下の割合）があれば、計算量を測るための大きな入力を作ります（AtCoder Studio の「計算量」が渡します）。長さ・個数と 1 つで書かれた整数は *_LIMIT（制約の上限）× 割合、配列などのほかの値は *_LOW〜*_LIMIT です"
+        ),
         format!(
             "{comment} - 値の範囲は下の定数です（制約より小さくしてあります）。問題に合わせて直してください"
         ),
@@ -527,7 +700,20 @@ fn header(comment: &str, shape: Option<&Shape>, missing: Option<&str>) -> Vec<St
     lines
 }
 
-const RUST_HELPERS: &str = r#"struct Rng(u64);
+const RUST_HELPERS: &str = r#"// 値の範囲。scale（2 つ目の引数の割合）があれば大きくする：個数は limit × scale ちょうど、ほかは low〜limit
+#[allow(dead_code)]
+fn rspan(scale: Option<f64>, min: i64, max: i64, low: i64, limit: i64, count: bool) -> (i64, i64) {
+    match scale {
+        None => (min, max),
+        Some(s) if count => {
+            let v = ((limit as f64 * s).round() as i64).clamp(low, limit.max(low));
+            (v, v)
+        }
+        Some(_) => (low, limit),
+    }
+}
+
+struct Rng(u64);
 
 #[allow(dead_code)]
 impl Rng {
@@ -570,6 +756,19 @@ impl Rng {
 "#;
 
 const CPP_HELPERS: &str = r#"mt19937_64 rng;
+// 2 つ目の引数の割合（なければ 0）
+double scale = 0;
+
+// 値の範囲。scale があれば大きくする：個数は limit × scale ちょうど、ほかは low〜limit
+pair<long long, long long> rspan(long long mn, long long mx, long long low, long long limit, bool count) {
+    if (scale <= 0) return {mn, mx};
+    if (count) {
+        long long v = llround((double)limit * scale);
+        v = max(low, min(v, max(limit, low)));
+        return {v, v};
+    }
+    return {low, limit};
+}
 
 // lo 以上 hi 以下の整数（hi が lo より小さければ lo）
 long long rint(long long lo, long long hi) {
@@ -597,6 +796,18 @@ string rword(const vector<string>& chars, long long lo, long long hi) {
 "#;
 
 const PYTHON_HELPERS: &str = r#"rng = random.Random(int(sys.argv[1]) if len(sys.argv) > 1 else 0)
+# 2 つ目の引数の割合（なければ 0）
+SCALE = float(sys.argv[2]) if len(sys.argv) > 2 else 0.0
+
+
+def rspan(mn, mx, low, limit, count):
+    """値の範囲。SCALE があれば大きくする：個数は limit × SCALE ちょうど、ほかは low〜limit"""
+    if not 0 < SCALE <= 1:
+        return mn, mx
+    if count:
+        v = min(max(round(limit * SCALE), low), max(limit, low))
+        return v, v
+    return low, limit
 
 
 def rint(lo, hi):
@@ -670,10 +881,12 @@ pub fn generate(problem: &Problem, language: Language) -> (String, Option<String
                     shape.unmet.len()
                 ));
             }
+            let mut body = writer.spans();
+            body.extend(writer.body.iter().cloned());
             (
                 header(comment, Some(shape), None),
                 writer.constants(),
-                writer.body,
+                body,
                 (!notes.is_empty()).then(|| format!("生成器：{}", notes.join("。"))),
             )
         }
@@ -701,7 +914,7 @@ pub fn generate(problem: &Problem, language: Language) -> (String, Option<String
             text.push('\n');
             text.push_str(RUST_HELPERS);
             text.push_str(&format!(
-                "\nfn main() {{\n    let seed: u64 = std::env::args().nth(1).and_then(|s| s.parse().ok()).unwrap_or(0);\n    #[allow(unused_mut, unused_variables)]\n    let mut rng = Rng::new(seed);\n{body}\n}}\n"
+                "\nfn main() {{\n    let seed: u64 = std::env::args().nth(1).and_then(|s| s.parse().ok()).unwrap_or(0);\n    #[allow(unused_variables)]\n    let scale: Option<f64> = std::env::args().nth(2).and_then(|s| s.parse().ok()).filter(|s: &f64| *s > 0.0 && *s <= 1.0);\n    #[allow(unused_mut, unused_variables)]\n    let mut rng = Rng::new(seed);\n{body}\n}}\n"
             ));
         }
         Language::Cpp => {
@@ -710,7 +923,7 @@ pub fn generate(problem: &Problem, language: Language) -> (String, Option<String
             text.push('\n');
             text.push_str(CPP_HELPERS);
             text.push_str(&format!(
-                "\nint main(int argc, char* argv[]) {{\n    rng.seed(argc > 1 ? strtoull(argv[1], nullptr, 10) : 0);\n{body}\n}}\n"
+                "\nint main(int argc, char* argv[]) {{\n    rng.seed(argc > 1 ? strtoull(argv[1], nullptr, 10) : 0);\n    if (argc > 2) {{\n        scale = atof(argv[2]);\n        if (!(scale > 0 && scale <= 1)) scale = 0;\n    }}\n{body}\n}}\n"
             ));
         }
         Language::Python => {
@@ -778,6 +991,18 @@ mod tests {
 
     // 作った Rust の生成器をビルドして、seed 1〜count の出力を返す
     fn run_rust(dir: &Path, source: &str, count: u64) -> Vec<String> {
+        let exe = build_rust(dir, source);
+        (1..=count)
+            .map(|seed| {
+                let output = Command::new(&exe).arg(seed.to_string()).output().unwrap();
+                assert!(output.status.success());
+                String::from_utf8(output.stdout).unwrap()
+            })
+            .collect()
+    }
+
+    // 作った Rust の生成器をビルドする（警告も出ないこと）
+    fn build_rust(dir: &Path, source: &str) -> PathBuf {
         let src = dir.join("gen.rs");
         std::fs::write(&src, source).unwrap();
         let exe = dir.join("gen");
@@ -799,13 +1024,135 @@ mod tests {
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
-        (1..=count)
-            .map(|seed| {
-                let output = Command::new(&exe).arg(seed.to_string()).output().unwrap();
-                assert!(output.status.success());
-                String::from_utf8(output.stdout).unwrap()
-            })
-            .collect()
+        exe
+    }
+
+    // 生成器を seed と大きさの割合で動かす（D-270）
+    fn run_scaled(exe: &Path, seed: u64, scale: &str) -> String {
+        let output = Command::new(exe)
+            .args([seed.to_string(), scale.to_string()])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        String::from_utf8(output.stdout).unwrap()
+    }
+
+    // 大きさの割合（2 つ目の引数）があれば、制約の上限 × 割合の大きな入力を作る（Phase 45。D-270）
+    #[test]
+    fn generates_large_inputs_with_a_scale() {
+        let dir = TempDir::new("scale");
+        let html = statement(
+            &["<var>N</var>\n<var>A_1</var> <var>A_2</var> <var>\\ldots</var> <var>A_N</var>"],
+            &["1 \\leq N \\leq 2\\times 10^5", "1 \\leq A_i \\leq 10^9"],
+        );
+        let (source, _) = generate(&problem(&html, "3\n1 2 3\n"), Language::Rust);
+        assert!(source.contains("const N_LIMIT: i64 = 200000;"), "{source}");
+        assert!(
+            source.contains("const A_LIMIT: i64 = 1000000000;"),
+            "{source}"
+        );
+        let exe = build_rust(&dir.0, &source);
+        // 割合 1：N は上限ちょうど、A_i は制約の範囲いっぱい
+        let full = numbers(&run_scaled(&exe, 1, "1"));
+        assert_eq!(full[0], 200_000);
+        assert_eq!(full.len(), 200_001);
+        assert!(full[1..].iter().all(|a| (1..=1_000_000_000).contains(a)));
+        assert!(full[1..].iter().any(|a| *a > 1_000_000));
+        // 割合 1/8：N は 25000
+        assert_eq!(numbers(&run_scaled(&exe, 1, "0.125"))[0], 25_000);
+        // 割合がないとき・範囲の外のときは、今までの小さな入力
+        for scale in ["0", "2", "x"] {
+            assert!(
+                (1..=8).contains(&numbers(&run_scaled(&exe, 1, scale))[0]),
+                "{scale}"
+            );
+        }
+
+        // 入力が N だけ（長さに使わない 1 つの整数）でも、N の値を上限 × 割合にする
+        let html = statement(&["<var>N</var>"], &["1 \\leq N \\leq 100"]);
+        let (source, _) = generate(&problem(&html, "5\n"), Language::Rust);
+        let exe = build_rust(&dir.0, &source);
+        assert_eq!(numbers(&run_scaled(&exe, 1, "1")), vec![100]);
+        assert_eq!(numbers(&run_scaled(&exe, 2, "0.5")), vec![50]);
+        assert_eq!(numbers(&run_scaled(&exe, 1, "0.0078125")), vec![1]);
+
+        // テストケースの数は下限（1）にする
+        let html = statement(
+            &[
+                "<var>T</var>\n<var>\\mathrm{case}_1</var>\n<var>\\vdots</var>\n<var>\\mathrm{case}_T</var>",
+                "<var>N</var>",
+            ],
+            &["1 \\leq T \\leq 10^5", "1 \\leq N \\leq 10^9"],
+        );
+        let (source, _) = generate(&problem(&html, "1\n5\n"), Language::Rust);
+        assert!(source.contains("const T_LIMIT: i64 = 1;"), "{source}");
+        let exe = build_rust(&dir.0, &source);
+        assert_eq!(run_scaled(&exe, 1, "1").lines().next(), Some("1"));
+
+        // 文字列の長さは、長さの上限 × 割合
+        let html = statement(
+            &["<var>S</var>"],
+            &["1 \\leq |S| \\leq 1000", "S は英小文字からなる文字列"],
+        );
+        let (source, _) = generate(&problem(&html, "abc\n"), Language::Rust);
+        assert!(
+            source.contains("const S_LEN_LIMIT: i64 = 1000;"),
+            "{source}"
+        );
+        let exe = build_rust(&dir.0, &source);
+        assert_eq!(run_scaled(&exe, 1, "1").trim_end().len(), 1000);
+        assert_eq!(run_scaled(&exe, 1, "0.5").trim_end().len(), 500);
+
+        // C++・Python も同じ（処理系があるときだけ）
+        let html = statement(
+            &["<var>N</var>\n<var>A_1</var> <var>A_2</var> <var>\\ldots</var> <var>A_N</var>"],
+            &["1 \\leq N \\leq 2\\times 10^5", "1 \\leq A_i \\leq 10^9"],
+        );
+        let sample = problem(&html, "3\n1 2 3\n");
+        let check = |output: std::process::Output| {
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let values = numbers(&String::from_utf8(output.stdout).unwrap());
+            assert_eq!(values[0], 100_000);
+            assert_eq!(values.len(), 100_001);
+            assert!(values[1..].iter().all(|a| (1..=1_000_000_000).contains(a)));
+        };
+        if let Ok(compiler) = crate::cpp::find_compiler(&crate::cpp::CppSettings::default()) {
+            let (source, _) = generate(&sample, Language::Cpp);
+            let src = dir.0.join("scale.cpp");
+            std::fs::write(&src, &source).unwrap();
+            let exe = dir.0.join("scale-cpp");
+            let output = Command::new(&compiler)
+                .args(["-std=gnu++23", "-O2", "-Wall", "-Wextra", "-o"])
+                .arg(&exe)
+                .arg(&src)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            check(Command::new(&exe).args(["1", "0.5"]).output().unwrap());
+        }
+        if let Some(python) = ["/usr/bin/python3", "/opt/homebrew/bin/python3"]
+            .into_iter()
+            .find(|path| Path::new(path).is_file())
+        {
+            let (source, _) = generate(&sample, Language::Python);
+            let src = dir.0.join("scale.py");
+            std::fs::write(&src, &source).unwrap();
+            check(
+                Command::new(python)
+                    .arg(&src)
+                    .args(["1", "0.5"])
+                    .output()
+                    .unwrap(),
+            );
+        }
     }
 
     // 出力が、入力の形式どおりか（入力のコードを作る処理と同じ確かめ方。型は生成器と同じく、文字の選択肢も使う）

@@ -130,6 +130,8 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
         binding("showContest", "c", (true, false, true)),
         // ⇧⌘M サイドバーの「メモ」（Phase 39。D-263）
         binding("showMemo", "m", (true, false, true)),
+        // ⇧⌘B サイドバーの「ライブラリ」（Phase 46。D-271）
+        binding("showLibrary", "b", (true, false, true)),
     ]
 }
 

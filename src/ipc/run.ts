@@ -71,7 +71,37 @@ export type Finish =
       score: string | null;
       error: string | null;
     }
-  | { kind: "ran"; outcome: RunOutcome; elapsedMs: number; outputLeftOpen: boolean };
+  | { kind: "ran"; outcome: RunOutcome; elapsedMs: number; outputLeftOpen: boolean }
+  // 計算量を測った（Phase 45。D-270。実行履歴には残さない）
+  | ({ kind: "measured" } & Measured);
+
+// 計算量の 1 段（Phase 45。D-270）。scale は大きさの割合（1/128〜1）、時間はミリ秒、メモリは KiB
+export type ComplexityStep = {
+  scale: number;
+  inputBytes: number;
+  timesMs: number[];
+  medianMs: number;
+  memoryKib: number | null;
+  // 1 回の時間の上限を超えた
+  timedOut: boolean;
+};
+
+export type Measured = {
+  steps: ComplexityStep[];
+  // 伸び方の指数（当てはめられなければ null）と、近い形の名前
+  exponent: number | null;
+  shape: string | null;
+  // 割合 1 の時間。estimated なら伸び方からの見積もり
+  fullMs: number | null;
+  estimated: boolean;
+  memoryKib: number | null;
+  // compare.json の時間の制限・メモリの制限と、1 回の時間の上限
+  timeLimitMs: number;
+  memoryLimitMib: number;
+  stepLimitMs: number;
+  interrupted: boolean;
+  note: string | null;
+};
 
 // ランダムテストで見つかった失敗（Phase 4b 作業 3。D-143）
 export type RandomFailure = {
@@ -135,6 +165,8 @@ export type RunEvent =
   | { type: "randomProgress"; index: number; total: number; seed: number }
   // デバッグの知らせ（Phase 5。D-146）
   | { type: "debug"; event: DebugEvent }
+  // 計算量の 1 段の結果（Phase 45。D-270）
+  | { type: "complexityStep"; step: ComplexityStep }
   | { type: "finished"; finish: Finish };
 
 // ビルドして実行する（test が true ならサンプルテスト）。終わるまで返らない。
@@ -168,6 +200,13 @@ export function startRandom(target: Target, onEvent: (event: RunEvent) => void):
   const channel = new Channel<RunEvent>();
   channel.onmessage = onEvent;
   return invoke<void>("start_random", { target, onEvent: channel });
+}
+
+// 計算量を測る（Phase 45。D-270）。終わるまで返らない。経過は onEvent で受け取る
+export function startComplexity(target: Target, onEvent: (event: RunEvent) => void): Promise<void> {
+  const channel = new Channel<RunEvent>();
+  channel.onmessage = onEvent;
+  return invoke<void>("start_complexity", { target, onEvent: channel });
 }
 
 // 実行中の処理を止める

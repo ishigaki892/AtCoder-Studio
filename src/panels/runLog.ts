@@ -70,6 +70,19 @@ export function describeFinish(finish: Finish): string {
       }
       return `ランダムテスト：成功（${finish.total} 回すべて、愚直解と一致しました）`;
     }
+    case "measured": {
+      // 計算量（Phase 45。D-270）
+      if (finish.interrupted) {
+        return `計算量を測るのを止めました（${finish.steps.length} 段を測りました）`;
+      }
+      const growth =
+        finish.exponent === null ? "伸び方は出せませんでした" : `指数 ${finish.exponent.toFixed(2)}（${finish.shape}）`;
+      const full =
+        finish.fullMs === null
+          ? ""
+          : `。最大の大きさで${finish.estimated ? "約 " : " "}${finish.fullMs} ms（時間の制限 ${finish.timeLimitMs} ms）`;
+      return `計算量：${growth}${full}`;
+    }
     case "submitted":
       // AtCoder への提出（Phase 6。D-148 §2.8）
       if (finish.error) {

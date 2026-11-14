@@ -406,6 +406,7 @@ export function useTabs(onError: (message: string) => void, onSaved?: (path: str
     open,
     openReadOnly,
     reload,
+    save,
     update,
     saveActive,
     saveAll,

@@ -1647,6 +1647,79 @@ button.breadcrumb:focus-visible {
   color: var(--fg-secondary);
 }
 
+/* 計算量（Phase 45。D-270） */
+.complexity-view {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.complexity-result {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  color: var(--fg-default);
+}
+
+.complexity-over {
+  color: var(--verdict-ng);
+  font-weight: 600;
+}
+
+.complexity-body {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 16px;
+}
+
+.complexity-table {
+  border-collapse: collapse;
+  font-variant-numeric: tabular-nums;
+}
+
+.complexity-table th,
+.complexity-table td {
+  padding: 2px 10px 2px 0;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  white-space: nowrap;
+}
+
+.complexity-table th {
+  color: var(--fg-secondary);
+  font-weight: normal;
+}
+
+.complexity-chart {
+  flex: none;
+}
+
+.complexity-axis {
+  stroke: var(--fg-muted);
+  stroke-width: 1;
+}
+
+.complexity-tick {
+  fill: var(--fg-secondary);
+  font-size: 10px;
+}
+
+.complexity-limit {
+  stroke: var(--verdict-ng);
+  stroke-width: 1;
+  stroke-dasharray: 4 3;
+}
+
+.complexity-fit {
+  stroke: var(--accent-focus);
+  stroke-width: 1.5;
+}
+
+.complexity-point {
+  fill: var(--fg-strong);
+}
+
 .test-summary {
   display: flex;
   align-items: center;
@@ -3658,4 +3731,150 @@ body.hide-breadcrumbs .breadcrumbs {
 .settings-list .settings-group h3 {
   margin: 12px 0 4px;
   color: var(--fg-strong);
+}
+
+/* サイドバーの「ライブラリ」（Phase 46。D-271）。上に言語の切り替えと検索の欄、下に一覧 */
+.library-view {
+  display: flex;
+  flex: 1 1 0;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.library-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0 8px 6px;
+}
+
+.library-languages {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.library-refresh,
+.library-action,
+.library-link {
+  flex: none;
+  padding: 1px 6px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  background: none;
+  color: var(--accent-focus);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.library-refresh {
+  margin-left: auto;
+}
+
+.library-link {
+  margin-left: 4px;
+}
+
+.library-notice {
+  margin: 0 12px 6px;
+  color: var(--fg-secondary);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.library-list {
+  flex: 1 1 0;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.library-list ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.library-heading {
+  margin: 8px 12px 2px;
+  color: var(--fg-secondary);
+  font-size: 12px;
+}
+
+.library-row {
+  padding: 3px 8px 3px 4px;
+}
+
+.library-row:hover {
+  background: var(--bg-list-selected);
+}
+
+.library-line {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.library-toggle {
+  flex: none;
+  width: 16px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--fg-muted);
+  font: inherit;
+  cursor: pointer;
+}
+
+.library-toggle:disabled {
+  cursor: default;
+}
+
+.library-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.library-description {
+  margin-left: 20px;
+  overflow: hidden;
+  color: var(--fg-secondary);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.library-items li {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 20px;
+}
+
+.library-item {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 1px 4px;
+  overflow: hidden;
+  border: none;
+  border-radius: 3px;
+  background: none;
+  color: var(--fg-default);
+  font: inherit;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.library-item:hover {
+  color: var(--accent-focus);
+}
+
+.library-kind {
+  color: var(--fg-muted);
+  font-size: 11px;
 }

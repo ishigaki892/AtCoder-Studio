@@ -64,7 +64,7 @@ pub(crate) fn pick_programs(
 
 // 標準入力に渡す入力。パイプに書く別のスレッドを立てる（一時ファイルを作らない）。
 // 読まずに終わるプログラムでは、書き込みが途中で失敗するが、無視してよい
-fn pipe_input(bytes: &[u8]) -> Result<File, String> {
+pub(crate) fn pipe_input(bytes: &[u8]) -> Result<File, String> {
     let (reader, mut writer) =
         std::io::pipe().map_err(|error| format!("入力を渡せません：{error}"))?;
     let data = bytes.to_vec();
@@ -74,7 +74,7 @@ fn pipe_input(bytes: &[u8]) -> Result<File, String> {
     Ok(File::from(OwnedFd::from(reader)))
 }
 
-fn command(executable: &Program, dir: &Path) -> Command {
+pub(crate) fn command(executable: &Program, dir: &Path) -> Command {
     let mut command = executable.command();
     command.current_dir(dir);
     toolchain::clear_ide_env(&mut command);
@@ -82,7 +82,7 @@ fn command(executable: &Program, dir: &Path) -> Command {
 }
 
 // 生成器・愚直解を 1 回動かした結果
-enum Helper {
+pub(crate) enum Helper {
     Done(Vec<u8>),
     Stopped,
     Failed(String),
@@ -99,6 +99,32 @@ fn run_helper(
     cancel: &Arc<AtomicBool>,
     emit: &mut dyn FnMut(RunEvent),
 ) -> Helper {
+    run_helper_with(
+        what,
+        executable,
+        dir,
+        seed,
+        None,
+        input,
+        OUTPUT_LIMIT,
+        cancel,
+        emit,
+    )
+}
+
+// run_helper に、生成器の 2 つ目の引数（計算量の大きさの割合。D-270）と、出力の上限を足したもの
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_helper_with(
+    what: &str,
+    executable: &Program,
+    dir: &Path,
+    seed: u64,
+    scale: Option<&str>,
+    input: Option<&[u8]>,
+    output_limit: usize,
+    cancel: &Arc<AtomicBool>,
+    emit: &mut dyn FnMut(RunEvent),
+) -> Helper {
     let mut program = command(executable, dir);
     let stdin = match input {
         Some(bytes) => match pipe_input(bytes) {
@@ -107,6 +133,7 @@ fn run_helper(
         },
         None => {
             program.arg(seed.to_string());
+            program.args(scale);
             None
         }
     };
@@ -115,7 +142,7 @@ fn run_helper(
         stdin,
         &Limits {
             time: Some(RUN_TIME_LIMIT),
-            output: OUTPUT_LIMIT,
+            output: output_limit,
             memory: None,
         },
         cancel,
@@ -138,7 +165,7 @@ fn run_helper(
         Outcome::TimedOut => format!("{} 秒の上限を超えました", RUN_TIME_LIMIT.as_secs()),
         Outcome::OutputLimit(_) => format!(
             "出力が上限（{} MiB）を超えました",
-            OUTPUT_LIMIT / 1024 / 1024
+            output_limit / 1024 / 1024
         ),
     };
     let stderr = shown(&result.stderr);
