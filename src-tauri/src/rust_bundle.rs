@@ -550,7 +550,12 @@ pub fn bundle(
                 )
             })?;
         let expanded = crate::rust_expand::expand(&lib_path, &content, &package_dir)?;
-        for name in expanded.missing.iter().chain(&expanded.path_attributes) {
+        for name in expanded
+            .missing
+            .iter()
+            .chain(&expanded.path_attributes)
+            .chain(&expanded.outside)
+        {
             bundled.warnings.push(format!(
                 "ライブラリ「{module}」の mod {name}; は展開できませんでした"
             ));

@@ -250,6 +250,12 @@ pub fn rust_expand_warnings(expanded: &crate::rust_expand::Expanded) -> Vec<Stri
             list(&expanded.path_attributes)
         ));
     }
+    if !expanded.outside.is_empty() {
+        warnings.push(format!(
+            "パッケージのフォルダの外を指すモジュール（{}）は、手元のほかのファイルを提出するソースに入れないように、展開していません。ジャッジには、このファイルだけが置かれます",
+            list(&expanded.outside)
+        ));
+    }
     if !expanded.includes.is_empty() {
         warnings.push(format!(
             "展開したモジュール（{}）の include! などの相対パスは、展開すると提出するファイルからの相対になります",
@@ -499,6 +505,17 @@ pub fn prepare_cpp(
                 .collect::<Vec<_>>()
                 .join("、"),
             cpp::LIBRARY_DIR
+        ));
+    }
+    if !expanded.outside.is_empty() {
+        warnings.push(format!(
+            "作業領域とライブラリのフォルダの外のファイルを読む #include（{}）があります。手元のほかのファイルを提出するソースに入れないように、展開していません。ジャッジには、このファイルだけが置かれます",
+            expanded
+                .outside
+                .iter()
+                .map(|name| format!("#include \"{name}\""))
+                .collect::<Vec<_>>()
+                .join("、")
         ));
     }
     if !expanded.headers.is_empty() {
@@ -2163,6 +2180,9 @@ pub struct TaskStatus {
     pub title: String,
     // AC の提出がある
     pub accepted: bool,
+    // いちばん新しい AC の提出日時（UNIX 時間の秒。分からなければ None）。経過時間は、数え始めたあとの AC だけで止める
+    // （docs/bug-review-2026-11-14.md の B-1）
+    pub last_accepted_at: Option<i64>,
     // いちばん新しい提出の判定と ID（提出がなければ None）
     pub last: Option<String>,
     pub last_id: Option<u64>,
@@ -2211,6 +2231,7 @@ pub fn summarize(tasks: &[crate::problem::TaskEntry], rows: &[MineRow]) -> Vec<T
             label: entry.label.clone(),
             title: entry.title.clone(),
             accepted: false,
+            last_accepted_at: None,
             last: None,
             last_id: None,
             count: 0,
@@ -2225,6 +2246,7 @@ pub fn summarize(tasks: &[crate::problem::TaskEntry], rows: &[MineRow]) -> Vec<T
                     label: String::new(),
                     title: row.task.clone(),
                     accepted: false,
+                    last_accepted_at: None,
                     last: None,
                     last_id: None,
                     count: 0,
@@ -2234,7 +2256,10 @@ pub fn summarize(tasks: &[crate::problem::TaskEntry], rows: &[MineRow]) -> Vec<T
         };
         let status = &mut list[index];
         status.count += 1;
-        status.accepted |= row.verdict == "AC";
+        if row.verdict == "AC" {
+            status.accepted = true;
+            status.last_accepted_at = status.last_accepted_at.max(row.time);
+        }
         if status.last_id.is_none_or(|last| row.id > last) {
             status.last = Some(row.verdict.clone());
             status.last_id = Some(row.id);
@@ -2960,6 +2985,7 @@ mod tests {
 
     // 展開するヘッダーを探す場所がないとき（隣のヘッダーだけを探す）と、文法の確かめを呼ばないことを確かめる関数
     const NO_DIRS: crate::cpp_expand::SearchDirs = crate::cpp_expand::SearchDirs {
+        workspace: None,
         library: None,
         ac_library: None,
     };
@@ -2987,6 +3013,7 @@ mod tests {
         )
         .unwrap();
         let dirs = crate::cpp_expand::SearchDirs {
+            workspace: None,
             library: Some(&lib),
             ac_library: None,
         };
@@ -4477,6 +4504,29 @@ mod tests {
                 ("x_z", "", false, Some("WJ"), Some(9), 1),
             ]
         );
+    }
+
+    // いちばん新しい AC の提出日時（経過時間を、数え始めたあとの AC だけで止める。B-1）
+    #[test]
+    fn keeps_the_latest_accepted_time() {
+        let row = |id, verdict: &str, time| MineRow {
+            id,
+            task: "x_a".to_string(),
+            verdict: verdict.to_string(),
+            time,
+            score: None,
+        };
+        let tasks = task_entries(&[("x_a", "A")]);
+        let rows = [
+            row(3, "WA", Some(300)),
+            row(2, "AC", Some(200)),
+            row(1, "AC", Some(100)),
+        ];
+        assert_eq!(summarize(&tasks, &rows)[0].last_accepted_at, Some(200));
+        // 時刻の分からない AC だけなら None（AC であることは分かる）
+        let status = &summarize(&tasks, &[row(1, "AC", None)])[0];
+        assert!(status.accepted);
+        assert_eq!(status.last_accepted_at, None);
     }
 
     #[test]

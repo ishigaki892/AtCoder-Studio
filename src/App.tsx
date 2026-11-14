@@ -579,7 +579,8 @@ function App() {
   // 一覧が読めなくても（開始前でも）そのコンテストにする。問題が変わったら、その問題のコンテストに戻る
   const [clockContest, setClockContest] = useState<string | null>(null);
   // 「コンテストを作る」で予約したコンテスト（Phase 43。D-267）。予約している間は、残り時間をこのコンテストにする
-  const [reservedContest, setReservedContest] = useState<string | null>(null);
+  const [reservation, setReservation] = useState<{ contest: string; token: number } | null>(null);
+  const reservedContest = reservation?.contest ?? null;
   // バーチャル参加（Phase 44。D-268）。読めるまでは null
   const [virtualFile, setVirtualFile] = useState<VirtualFile | null>(null);
   useEffect(() => {
@@ -667,15 +668,31 @@ function App() {
   const [session, setSession] = useState<SessionView | null>(null);
   const [submissions, setSubmissions] = useState<SubmissionView[]>([]);
   // サイドバーの「コンテスト」の提出状況で AC と分かった問題（Phase 42。D-266。経過時間を止める）。アプリを開いている間だけ
-  const [acceptedFromStatus, setAcceptedFromStatus] = useState<ReadonlySet<string>>(new Set());
+  // 提出状況で分かった、問題ごとのいちばん新しい AC の時刻（UNIX 時間の秒。時刻が分からなければ 0）。経過時間を止める（D-266。B-1）
+  const [acceptedFromStatus, setAcceptedFromStatus] = useState<ReadonlyMap<string, number>>(new Map());
   function noteStatus(status: ContestStatus) {
-    const tasks = status.tasks.filter((task) => task.accepted).map((task) => task.task);
+    const tasks = status.tasks.filter((task) => task.accepted);
     setAcceptedFromStatus((current) => {
-      if (tasks.every((task) => current.has(task))) {
+      if (tasks.every((task) => (current.get(task.task) ?? -1) >= (task.lastAcceptedAt ?? 0))) {
         return current;
       }
-      return new Set([...current, ...tasks]);
+      const next = new Map(current);
+      for (const task of tasks) {
+        next.set(task.task, Math.max(next.get(task.task) ?? 0, task.lastAcceptedAt ?? 0));
+      }
+      return next;
     });
+  }
+  // 問題のいちばん新しい AC の時刻（提出状況と、IDE から出した提出の判定）。AC がなければ null
+  function acceptedAtOf(task: string): number | null {
+    const times = submissions
+      .filter((submission) => submission.task === task && submission.state === "done" && submission.judge?.label === "AC")
+      .map((submission) => Math.floor(submission.timeMs / 1000));
+    const fromStatus = acceptedFromStatus.get(task);
+    if (fromStatus !== undefined) {
+      times.push(fromStatus);
+    }
+    return times.length > 0 ? Math.max(...times) : null;
   }
   const [submitNotice, setSubmitNotice] = useState<SubmitNotice | null>(null);
   const [copyNote, setCopyNote] = useState<string | null>(null);
@@ -1972,7 +1989,7 @@ function App() {
                 hidden={!contestOpen}
                 initialContest={currentProblem?.contest ?? ""}
                 onCreated={handlePackagesCreated}
-                onReserve={setReservedContest}
+                onReserve={setReservation}
                 onClose={() => setContestOpen(false)}
               />
             }
@@ -2108,7 +2125,7 @@ function App() {
         {reservedContest && (
           <span className="contest-reservation" title="開始の 1 秒後に「コンテストを作る」で作ります（アプリを閉じると予約は消えます）">
             予約：{reservedContest} を作ります
-            <button type="button" className="contest-reservation-cancel" onClick={() => void cancelReservation().catch((e) => showError(String(e)))}>
+            <button type="button" className="contest-reservation-cancel" onClick={() => reservation && void cancelReservation(reservation.token).catch((e) => showError(String(e)))}>
               取り消す
             </button>
           </span>
@@ -2275,14 +2292,7 @@ function App() {
             marks={marks}
             onMark={changeMark}
             onRetry={changeRetry}
-            accepted={
-              currentProblem !== null &&
-              (acceptedFromStatus.has(currentProblem.task) ||
-                submissions.some(
-                  (submission) =>
-                    submission.task === currentProblem.task && submission.state === "done" && submission.judge?.label === "AC",
-                ))
-            }
+            acceptedAt={currentProblem !== null ? acceptedAtOf(currentProblem.task) : null}
             onOpenMemo={() => {
               setSidebarView("memo");
               setSidebar((current) => ({ ...current, visible: true }));

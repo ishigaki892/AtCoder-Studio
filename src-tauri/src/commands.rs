@@ -1406,9 +1406,13 @@ pub async fn set_problem_time(
     .map_err(|_| "経過時間を保存できません".to_string())?
 }
 
-// 「⟲」：確かめてから、1 問の経過時間を 0 に戻す（Phase 42。D-266）。戻したら true
+// 「⟲」：確かめてから、1 問の経過時間を 0 に戻し、数え始めた時刻を今にする（Phase 42。D-266。B-1）。
+// 戻したら新しい記録を返す。やめたら null
 #[tauri::command]
-pub async fn reset_problem_time(id: String, app: AppHandle) -> Result<bool, String> {
+pub async fn reset_problem_time(
+    id: String,
+    app: AppHandle,
+) -> Result<Option<crate::problem_times::ProblemTime>, String> {
     ensure_primary(&app)?;
     let dir = app_dir(&app)?;
     tauri::async_runtime::spawn_blocking(move || {
@@ -1423,11 +1427,15 @@ pub async fn reset_problem_time(id: String, app: AppHandle) -> Result<bool, Stri
             ))
             .blocking_show();
         if !confirmed {
-            return Ok(false);
+            return Ok(None);
         }
-        let (_, backup) = crate::problem_times::set(&dir, &id, Default::default())?;
+        let time = crate::problem_times::ProblemTime {
+            started_at: Some(now_unix_secs().max(0) as u64),
+            ..Default::default()
+        };
+        let (_, backup) = crate::problem_times::set(&dir, &id, time)?;
         notify_broken_times(&app, backup);
-        Ok(true)
+        Ok(Some(time))
     })
     .await
     .map_err(|_| "経過時間を戻せません".to_string())?
@@ -1899,6 +1907,7 @@ pub async fn atcoder_submit(
                     .map(|(_, number)| number);
                 // 展開するヘッダーを探す場所（D-248）。文法の確かめには、ジャッジにある AC Library だけを渡す
                 let dirs = crate::cpp_expand::SearchDirs {
+                    workspace: Some(&root),
                     library: cpp_settings.library.as_deref(),
                     ac_library: cpp_settings.ac_library.as_deref(),
                 };
@@ -2276,6 +2285,8 @@ pub enum ReserveEvent {
         wait: u64,
         message: String,
     },
+    // ほかのコンテストを「作る」で作っている途中なので、終わるのを待つ（B-5）
+    WaitingScaffold,
     // 問題の一覧を読めた。作り始める
     Creating,
 }
@@ -2285,6 +2296,7 @@ pub enum ReserveEvent {
 #[tauri::command]
 pub async fn reserve_contest(
     contest: String,
+    token: u64,
     on_wait: tauri::ipc::Channel<ReserveEvent>,
     on_event: tauri::ipc::Channel<ScaffoldEvent>,
     app: AppHandle,
@@ -2293,45 +2305,84 @@ pub async fn reserve_contest(
         ProblemId::new(&contest, "x")?;
         app.state::<Workspace>().root()?;
         // 開催期間（ツールバーの残り時間と同じ。覚えてあれば読まない）
-        let period = submit::contest_period(&submit::Remote::app(), &contest, false)?;
+        let mut period = submit::contest_period(&submit::Remote::app(), &contest, false)?;
         crate::reserve::check(period.start, period.end, crate::reserve::now_ms())?;
-        let generation = crate::reserve::begin(&contest)?;
+        let Some(generation) = crate::reserve::begin(&contest, token)? else {
+            // 始める前に取り消された（B-2）
+            return Ok(None);
+        };
         let _finish = crate::reserve::Finish(generation);
         let _ = on_wait.send(ReserveEvent::Waiting {
             start: period.start,
         });
         let cancelled = || !crate::reserve::active(generation);
         let sleep = |duration| std::thread::sleep(duration);
-        let start = period.start * 1000 + crate::reserve::START_DELAY_MS;
-        if !crate::reserve::wait_until(start, &cancelled, &crate::reserve::now_ms, &sleep) {
-            return Ok(None);
-        }
-        // 眠っていて、起きたらもう終わっていた
-        if crate::reserve::now_ms() >= period.end * 1000 {
-            return Err(format!("{contest} は終わっていたので、作りませんでした"));
-        }
         let dir = app_dir(&app)?;
-        let listed = crate::reserve::list_with_retries(
-            &|| problem::load_task_list(&dir, &contest, true),
-            &|duration| {
-                let until = crate::reserve::now_ms() + duration.as_millis() as i64;
-                crate::reserve::wait_until(until, &cancelled, &crate::reserve::now_ms, &sleep)
-            },
-            &|attempt, wait, message| {
-                let _ = on_wait.send(ReserveEvent::Retrying {
-                    attempt,
-                    wait,
-                    message: message.to_string(),
-                });
-            },
-        )?;
-        if listed.is_none() {
-            return Ok(None);
+        // 開始が遅れたとき（読み直しても読めないとき）は、開催期間を読み直して待ち直す（B-4）
+        let mut rereads = 0;
+        loop {
+            let start = period.start * 1000 + crate::reserve::START_DELAY_MS;
+            if !crate::reserve::wait_until(start, &cancelled, &crate::reserve::now_ms, &sleep) {
+                return Ok(None);
+            }
+            // 眠っていて、起きたらもう終わっていた
+            if crate::reserve::now_ms() >= period.end * 1000 {
+                return Err(format!("{contest} は終わっていたので、作りませんでした"));
+            }
+            let listed = crate::reserve::list_with_retries(
+                &|| problem::load_task_list(&dir, &contest, true),
+                &|duration| {
+                    let until = crate::reserve::now_ms() + duration.as_millis() as i64;
+                    crate::reserve::wait_until(until, &cancelled, &crate::reserve::now_ms, &sleep)
+                },
+                &|attempt, wait, message| {
+                    let _ = on_wait.send(ReserveEvent::Retrying {
+                        attempt,
+                        wait,
+                        message: message.to_string(),
+                    });
+                },
+            );
+            match listed {
+                Ok(Some(_)) => break,
+                Ok(None) => return Ok(None),
+                Err(message) => {
+                    if rereads >= crate::reserve::MAX_PERIOD_REREADS {
+                        return Err(message);
+                    }
+                    rereads += 1;
+                    let next = submit::contest_period(&submit::Remote::app(), &contest, true)
+                        .map_err(|error| {
+                            format!("{message}（開催期間も読み直せませんでした：{error}）")
+                        })?;
+                    if next.start <= period.start {
+                        return Err(message);
+                    }
+                    period = next;
+                    let _ = on_wait.send(ReserveEvent::Waiting {
+                        start: period.start,
+                    });
+                }
+            }
         }
-        // 作り始める。ここからの取り消しは、作るのを止める（今の問題を取り終えたところで止まる）
+        // 作り始める。ここからの取り消しは、作るのを止める（今の問題を取り終えたところで止まる）。
+        // ほかのコンテストを作っている途中なら、終わるまで待つ（B-5）
         let root = app.state::<Workspace>().root()?;
         let control = app.state::<ScaffoldControl>();
-        let (_running, cancel) = control.begin()?;
+        let mut told = false;
+        let (_running, cancel) = loop {
+            match control.begin() {
+                Ok(begun) => break begun,
+                Err(_) if cancelled() => return Ok(None),
+                Err(_) => {
+                    if !told {
+                        told = true;
+                        let _ = on_wait.send(ReserveEvent::WaitingScaffold);
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                }
+            }
+        };
         crate::reserve::set_creating(generation);
         if cancelled() {
             return Ok(None);
@@ -2360,10 +2411,10 @@ pub async fn reserve_contest(
     .map_err(|_| "予約したコンテストを作れません".to_string())?
 }
 
-// 予約を取り消す。作っている途中なら、作るのを止める。予約がなければ何もしない
+// 番号 token の予約を取り消す。作っている途中なら、作るのを止める。まだ始まっていなければ、始めない（B-2）
 #[tauri::command]
-pub fn cancel_reservation(control: State<'_, ScaffoldControl>) {
-    if crate::reserve::cancel() == Some(true) {
+pub fn cancel_reservation(token: u64, control: State<'_, ScaffoldControl>) {
+    if crate::reserve::cancel(token) == Some(true) {
         control.stop();
     }
 }
@@ -2691,12 +2742,26 @@ pub fn copy_source(
             .iter()
             .chain(&expanded.path_attributes)
             .map(|name| format!("mod {name};"))
+            .chain(expanded.outside.iter().map(|name| {
+                format!("mod {name};（パッケージのフォルダの外を指すので展開しません）")
+            }))
             .collect();
         missing.dedup();
         let mut shown = expanded.modules;
         let mut content = expanded.source;
-        // 使っている自作のライブラリも入れる（Phase 29。D-251。ビルドの確かめはしない）
-        if let Some(library_root) = crate::rust_bundle::library_dir(&app_dir(&app)?)
+        // 使っている自作のライブラリも入れる（Phase 29。D-251。ビルドの確かめはしない）。
+        // cargo を動かすので、信頼した作業領域だけ（作業領域の rust-toolchain.toml・.cargo/config.toml で、
+        // 作業領域の中のプログラムが動くことがあるため。docs/bug-review-2026-11-14.md の V-1）
+        let library = crate::rust_bundle::library_dir(&app_dir(&app)?);
+        if library.is_some() && workspace.trusted_root().is_err() {
+            let manifest = std::fs::read_to_string(package.join("Cargo.toml")).unwrap_or_default();
+            if manifest.contains("path") {
+                missing.push(
+                    "自作のライブラリ（このフォルダを信頼していないので、入れていません）"
+                        .to_string(),
+                );
+            }
+        } else if let Some(library_root) = library
             && let Some(cargo) = toolchain::find_cargo()
         {
             let metadata =
@@ -2779,14 +2844,21 @@ pub fn copy_source(
         &file,
         &content,
         &crate::cpp_expand::SearchDirs {
+            workspace: Some(&root),
             library: cpp.library.as_deref(),
             ac_library: cpp.ac_library.as_deref(),
         },
     )?;
+    let mut missing = expanded.missing;
+    missing.extend(
+        expanded.outside.into_iter().map(|name| {
+            format!("{name}（作業領域とライブラリのフォルダの外にあるので展開しません）")
+        }),
+    );
     Ok(CopySource {
         content: expanded.source,
         expanded: expanded.headers,
-        missing: expanded.missing,
+        missing,
     })
 }
 

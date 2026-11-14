@@ -5,6 +5,8 @@
 // - 入れ子も展開する。同じファイルは 1 回だけ入れる（#pragma once・インクルードガードと同じ結果。#pragma once の行は消す）
 // - `#include <…>` と、AC Library のフォルダで見つかるもの（`#include "atcoder/…"`）は展開しない（ジャッジにある）
 // - 見つからないものは、行を残して missing に入れる（呼び出し側が注意を出す）
+// - 作業領域（なければ main.cpp のフォルダ）と自作のライブラリのフォルダの外にあるもの（絶対パス・`..`・外を指すリンク）は
+//   展開せず、行を残して outside に入れる（手元のほかのファイルを、提出するソースに入れないため。docs/bug-review-2026-11-14.md の V-2）
 // - 限界：行ごとに見るだけで、`/* … */` の中や `#if` の中かどうかは区別しない（今の注意と同じ決め方）
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -14,6 +16,8 @@ const MAX_DEPTH: usize = 64;
 
 // ヘッダーを探す場所
 pub struct SearchDirs<'a> {
+    // 作業領域のルート。隣のヘッダーはこの中のものだけを展開する。なければ main.cpp のフォルダの中だけ
+    pub workspace: Option<&'a Path>,
     // 自作のライブラリのフォルダ（libraries/cpp/）。なければ None
     pub library: Option<&'a Path>,
     // AC Library のフォルダ（libraries/ac-library/）。ここで見つかるものは展開しない
@@ -29,6 +33,8 @@ pub struct Expanded {
     pub files: Vec<PathBuf>,
     // 見つからなかった `#include "…"` の名前（重ならない）
     pub missing: Vec<String>,
+    // 作業領域・ライブラリのフォルダの外にあるので展開しなかった `#include "…"` の名前（重ならない）
+    pub outside: Vec<String>,
 }
 
 // 行が `#include "name"` なら name。`#` と include の間・前後の空白は許す
@@ -56,6 +62,7 @@ struct State<'a> {
     headers: Vec<String>,
     files: Vec<PathBuf>,
     missing: Vec<String>,
+    outside: Vec<String>,
 }
 
 enum Found {
@@ -63,9 +70,23 @@ enum Found {
     // ジャッジにあるので、行をそのまま残す
     Keep,
     Missing,
+    // 作業領域・ライブラリのフォルダの外にあるので、展開しない
+    Outside,
 }
 
 impl State<'_> {
+    // 展開してよい場所（作業領域か main.cpp のフォルダ、ライブラリのフォルダ）の中か。path は canonicalize 済み
+    fn allowed(&self, path: &Path) -> bool {
+        let canonical = |dir: &Path| dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+        [
+            Some(canonical(self.dirs.workspace.unwrap_or(&self.main_dir))),
+            self.dirs.library.map(canonical),
+        ]
+        .into_iter()
+        .flatten()
+        .any(|dir| path.starts_with(dir))
+    }
+
     fn find(&self, from_dir: &Path, name: &str) -> Found {
         if let Some(path) = [Some(from_dir), self.dirs.library]
             .into_iter()
@@ -73,7 +94,12 @@ impl State<'_> {
             .map(|dir| dir.join(name))
             .find(|path| path.is_file())
         {
-            return Found::Expand(path);
+            let real = path.canonicalize().unwrap_or(path);
+            return if self.allowed(&real) {
+                Found::Expand(real)
+            } else {
+                Found::Outside
+            };
         }
         if self
             .dirs
@@ -124,6 +150,13 @@ impl State<'_> {
                         self.missing.push(name.to_string());
                     }
                 }
+                Found::Outside => {
+                    self.out.push_str(line.trim_end_matches(['\r', '\n']));
+                    self.out.push('\n');
+                    if !self.outside.iter().any(|known| known == name) {
+                        self.outside.push(name.to_string());
+                    }
+                }
                 Found::Expand(path) => {
                     let real = path.canonicalize().unwrap_or(path);
                     // 2 回目からは入れない（1 回目の場所で入っている）
@@ -169,6 +202,7 @@ pub fn expand(main_path: &Path, source: &str, dirs: &SearchDirs) -> Result<Expan
         headers: Vec::new(),
         files: Vec::new(),
         missing: Vec::new(),
+        outside: Vec::new(),
     };
     // main.cpp 自身を読み込むヘッダーがあっても、もう 1 度は入れない
     state
@@ -186,6 +220,7 @@ pub fn expand(main_path: &Path, source: &str, dirs: &SearchDirs) -> Result<Expan
         headers: state.headers,
         files: state.files,
         missing: state.missing,
+        outside: state.outside,
     })
 }
 
@@ -256,6 +291,7 @@ mod tests {
         let main = dir.write("pkg/main.cpp", "");
         let source = "#include <bits/stdc++.h>\n#include \"segtree.hpp\"\n#include \"fenwick.hpp\"\nint main() {}\n";
         let dirs = SearchDirs {
+            workspace: None,
             library: Some(&lib),
             ac_library: None,
         };
@@ -291,6 +327,7 @@ mod tests {
         dir.write("pkg/a.hpp", "int next_to_main;\n");
         let main = dir.write("pkg/main.cpp", "");
         let dirs = SearchDirs {
+            workspace: None,
             library: Some(&lib),
             ac_library: None,
         };
@@ -307,6 +344,7 @@ mod tests {
         dir.write("acl/atcoder/dsu", "// dsu\n");
         let main = dir.write("pkg/main.cpp", "");
         let dirs = SearchDirs {
+            workspace: None,
             library: None,
             ac_library: Some(&acl),
         };
@@ -316,6 +354,40 @@ mod tests {
         assert_eq!(expanded.source, source);
         assert!(expanded.headers.is_empty());
         assert_eq!(expanded.missing, ["nothing.hpp"]);
+    }
+
+    // 作業領域・ライブラリのフォルダの外のファイル（絶対パス・..・外を指すリンク）は展開しない（V-2）
+    #[test]
+    fn does_not_expand_files_outside_the_workspace() {
+        let dir = TempDir::new("outside");
+        let secret = dir.write("outside/secret.txt", "SECRET\n");
+        dir.write("ws/common/util.hpp", "int util;\n");
+        let main = dir.write("ws/pkg/main.cpp", "");
+        std::os::unix::fs::symlink(&secret, dir.0.join("ws/pkg/link.hpp")).unwrap();
+        let workspace = dir.0.join("ws");
+        let dirs = SearchDirs {
+            workspace: Some(&workspace),
+            library: None,
+            ac_library: None,
+        };
+        let source = format!(
+            "#include \"{}\"\n#include \"../../outside/secret.txt\"\n#include \"link.hpp\"\n#include \"../common/util.hpp\"\nint main() {{}}\n",
+            secret.display()
+        );
+        let expanded = expand(&main, &source, &dirs).unwrap();
+        assert!(!expanded.source.contains("SECRET"));
+        assert_eq!(expanded.outside.len(), 3);
+        // 作業領域の中なら、隣のフォルダでも展開する
+        assert_eq!(expanded.headers, ["util.hpp"]);
+        assert!(expanded.source.contains("int util;"));
+        // 作業領域がなければ、main.cpp のフォルダの中だけ
+        let only_main = SearchDirs {
+            workspace: None,
+            library: None,
+            ac_library: None,
+        };
+        let expanded = expand(&main, "#include \"../common/util.hpp\"\n", &only_main).unwrap();
+        assert_eq!(expanded.outside, ["../common/util.hpp"]);
     }
 
     #[test]
@@ -328,6 +400,7 @@ mod tests {
         );
         let main = dir.write("pkg/main.cpp", "");
         let dirs = SearchDirs {
+            workspace: None,
             library: None,
             ac_library: None,
         };

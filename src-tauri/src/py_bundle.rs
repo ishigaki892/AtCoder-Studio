@@ -303,8 +303,24 @@ pub fn bundle(
     let mut table = String::new();
     let mut modules = Vec::new();
     let mut files = Vec::new();
+    // 入れてよい場所（main.py のフォルダと、自作のライブラリのフォルダ）。外を指すリンクの先は入れない
+    // （手元のほかのファイルを、提出するソースに入れないため。docs/bug-review-2026-11-14.md の V-2）
+    let canonical = |dir: &Path| dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+    let allowed: Vec<PathBuf> = [Some(package_dir), library]
+        .into_iter()
+        .flatten()
+        .map(canonical)
+        .collect();
     for module in &found.modules {
         let place = shown(&module.path, package_dir, library);
+        let real = canonical(&module.path);
+        if !allowed.iter().any(|dir| real.starts_with(dir)) {
+            return Err(format!(
+                "モジュール {}（{place}）は、main.py のフォルダとライブラリのフォルダの外（{}）にあるので入れません。手元のほかのファイルを提出するソースに入れないためです",
+                module.name,
+                real.display()
+            ));
+        }
         let text = if module.namespace {
             String::new()
         } else {
@@ -484,6 +500,39 @@ mod tests {
         );
         let values: Vec<String> = serde_json::from_slice(&output.stdout).unwrap();
         assert_eq!(values, texts);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // main.py のフォルダとライブラリのフォルダの外（外を指すリンクの先）のモジュールは入れない（V-2）
+    #[test]
+    fn refuses_modules_outside_the_folders() {
+        let dir = temp_dir("outside");
+        write(&dir.join("secret.py"), "SECRET = 1\n");
+        write(&dir.join("pkg/ok.py"), "OK = 1\n");
+        std::os::unix::fs::symlink(dir.join("secret.py"), dir.join("pkg/leak.py")).unwrap();
+        let package = dir.join("pkg");
+        let module = |name: &str| Module {
+            name: name.into(),
+            package: false,
+            path: package.join(format!("{name}.py")),
+            namespace: false,
+        };
+        let read = |path: &Path| std::fs::read_to_string(path).map_err(|e| e.to_string());
+        let found = Found {
+            modules: vec![module("ok"), module("leak")],
+            ..Found::default()
+        };
+        let error = bundle("import leak\n", &found, &package, None, &read).unwrap_err();
+        assert!(error.contains("leak") && error.contains("外"), "{error}");
+        let found = Found {
+            modules: vec![module("ok")],
+            ..Found::default()
+        };
+        assert!(
+            bundle("import ok\n", &found, &package, None, &read)
+                .unwrap()
+                .is_some()
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

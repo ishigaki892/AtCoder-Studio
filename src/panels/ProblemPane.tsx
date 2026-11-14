@@ -241,8 +241,9 @@ type Props = {
   onMakeRandom: (id: ProblemId) => Promise<string>;
   // メモのある問題の「✎」を押したとき（サイドバーの「メモ」を開く。Phase 39。D-263）
   onOpenMemo: () => void;
-  // 問題文の欄の問題の AC が分かっている（経過時間を止める。Phase 42。D-266）
-  accepted: boolean;
+  // 問題文の欄の問題のいちばん新しい AC の時刻（UNIX 時間の秒。時刻が分からなければ 0。AC がなければ null）。
+  // 経過時間を止める（Phase 42。D-266。数え始めたあとの AC だけ。B-1）
+  acceptedAt: number | null;
 };
 
 function ProblemPane({
@@ -257,7 +258,7 @@ function ProblemPane({
   onMark,
   onRetry,
   onOpenMemo,
-  accepted,
+  acceptedAt,
   folderBlocked,
   onRestart,
   onMakeRandom,
@@ -695,7 +696,7 @@ function ProblemPane({
                 </>
               )}
               {/* 問題ごとの経過時間（D-266） */}
-              <ProblemClock task={problemId.task} enabled={settings.timer} accepted={accepted} onError={setNotice} />
+              <ProblemClock task={problemId.task} enabled={settings.timer} acceptedAt={acceptedAt} onError={setNotice} />
               {/* メモがあれば「✎」（D-263）。押すとサイドバーの「メモ」を開く */}
               {marks[problemId.task]?.memo && (
                 <button

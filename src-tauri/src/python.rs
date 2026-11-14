@@ -213,7 +213,9 @@ pub(crate) fn find_in(
     names.iter().find_map(|name| {
         let in_path = || {
             path_var.and_then(|paths| {
+                // 相対パスの項目（`.` や空など）は使わない（作業のフォルダによって、別のプログラムを指すため。V-4）
                 std::env::split_paths(paths)
+                    .filter(|dir| dir.is_absolute())
                     .map(|dir| dir.join(name))
                     .find(|candidate| candidate.is_file())
             })
@@ -650,6 +652,22 @@ mod tests {
         assert_eq!(
             find_in(&["pypy3.11", "pypy3"], Some(&path_var), &brews),
             Some(local.join("pypy3.11"))
+        );
+        // PATH の相対パスの項目は使わない（V-4）。cargo のテストは src-tauri で動くので、相対の src には lib.rs がある
+        assert!(Path::new("src/lib.rs").is_file());
+        assert_eq!(
+            find_in(&["lib.rs"], Some(&OsString::from("src")), &[]),
+            None
+        );
+        assert_eq!(
+            find_in(
+                &["lib.rs"],
+                Some(&OsString::from(
+                    std::env::current_dir().unwrap().join("src")
+                )),
+                &[]
+            ),
+            Some(std::env::current_dir().unwrap().join("src/lib.rs"))
         );
         // 設定のパスがなければ、案内つきで断る
         let settings = PythonSettings {

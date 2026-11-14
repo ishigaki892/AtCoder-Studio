@@ -191,7 +191,18 @@ function VirtualSection({ contest, file, live, onVirtual }: VirtualProps) {
           </div>
         </>
       ) : current ? (
-        <p className="contest-note">{current.contest} でバーチャル参加しています（バーチャル参加は 1 つずつです）</p>
+        <>
+          <p className="contest-note">{current.contest} でバーチャル参加しています（バーチャル参加は 1 つずつです）</p>
+          {/* そのコンテストの問題を出さなくても終えられる（B-6） */}
+          <div className="virtual-actions">
+            <button type="button" className="contest-link" disabled={busy} onClick={() => void run(finishVirtual)}>
+              {busy ? "読んでいます…" : `${current.contest} の結果を出す`}
+            </button>
+            <button type="button" className="contest-link" disabled={busy} onClick={() => void run(cancelVirtual)}>
+              結果を残さずにやめる
+            </button>
+          </div>
+        </>
       ) : (
         <button
           type="button"

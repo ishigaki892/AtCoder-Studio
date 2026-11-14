@@ -42,6 +42,8 @@ function MemoPanel({ current, marks, visible, onSave, onSelect }: Props) {
   const pending = useRef<{ id: string; memo: string } | null>(null);
   const timer = useRef<number | null>(null);
   const seq = useRef(0);
+  // 送っている保存（保存は 1 つずつ、書いた順に送る。古い中身が後から書かれないように。B-9）
+  const inflight = useRef<Promise<void>>(Promise.resolve());
 
   async function flush() {
     if (timer.current !== null) {
@@ -54,8 +56,10 @@ function MemoPanel({ current, marks, visible, onSave, onSelect }: Props) {
       return;
     }
     setSaving(true);
+    const run = inflight.current.then(() => onSave(next.id, next.memo));
+    inflight.current = run.catch(() => {});
     try {
-      await onSave(next.id, next.memo);
+      await run;
       setError(null);
     } catch (e) {
       setError(String(e));

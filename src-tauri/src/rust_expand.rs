@@ -6,6 +6,8 @@
 //   インラインのモジュール（mod a { … }）の中は a/ だけ深い。x.rs か x/mod.rs（両方あれば誤り）
 // - 入れ子も展開する。文字列・文字・コメントの中は数えない（rust_lex.rs）
 // - 見つからないもの・`#[path = "…"]` の付いたものは展開しない（呼び出し側が注意を出す）
+// - パッケージのフォルダの外を指すもの（外を指すリンク）は展開しない（手元のほかのファイルを、提出するソースに入れないため。
+//   docs/bug-review-2026-11-14.md の V-2）。outside に入れる
 // - 展開したファイルの中の include!・include_str!・include_bytes! は、相対パスがずれるので知らせる
 use std::path::{Path, PathBuf};
 
@@ -25,6 +27,8 @@ pub struct Expanded {
     pub missing: Vec<String>,
     // `#[path]` の付いた `mod x;` の名前（展開しない）
     pub path_attributes: Vec<String>,
+    // パッケージのフォルダの外を指すので展開しなかった `mod x;` の名前（V-2）
+    pub outside: Vec<String>,
     // include! などを使っている、展開したファイルの見せ方
     pub includes: Vec<String>,
 }
@@ -111,6 +115,7 @@ struct State<'a> {
     files: Vec<PathBuf>,
     missing: Vec<String>,
     path_attributes: Vec<String>,
+    outside: Vec<String>,
     includes: Vec<String>,
 }
 
@@ -202,6 +207,17 @@ impl State<'_> {
                 ));
             }
             let real = file.canonicalize().unwrap_or(file);
+            let package = self
+                .package_dir
+                .canonicalize()
+                .unwrap_or_else(|_| self.package_dir.to_path_buf());
+            if !real.starts_with(&package) {
+                if !self.outside.contains(&name) {
+                    self.outside.push(name);
+                }
+                index += 3;
+                continue;
+            }
             let label = self.label(&real);
             let content = std::fs::read(&real)
                 .ok()
@@ -253,6 +269,7 @@ pub fn expand(main_path: &Path, source: &str, package_dir: &Path) -> Result<Expa
         files: Vec::new(),
         missing: Vec::new(),
         path_attributes: Vec::new(),
+        outside: Vec::new(),
         includes: Vec::new(),
     };
     let expanded = state.expand(source, base, 0)?;
@@ -266,6 +283,7 @@ pub fn expand(main_path: &Path, source: &str, package_dir: &Path) -> Result<Expa
         files: state.files,
         missing: state.missing,
         path_attributes: state.path_attributes,
+        outside: state.outside,
         includes: state.includes,
     })
 }
@@ -397,6 +415,28 @@ mod tests {
         // 展開するものがなければ、元のまま
         let plain = "// mod a;\nfn main() {}\r\n";
         assert_eq!(expand(&main, plain, &dir.0).unwrap().source, plain);
+    }
+
+    // パッケージのフォルダの外を指すモジュール（外を指すリンク）は展開しない（V-2）
+    #[test]
+    fn does_not_expand_modules_outside_the_package() {
+        let dir = TempDir::new("outside");
+        let secret = dir.0.join("secret.rs");
+        std::fs::write(&secret, "SECRET\n").unwrap();
+        let main = dir.write("pkg/src/main.rs", "");
+        std::os::unix::fs::symlink(&secret, dir.0.join("pkg/src/leak.rs")).unwrap();
+        dir.write("pkg/src/ok.rs", "pub fn ok() {}\n");
+        let expanded = expand(
+            &main,
+            "mod leak;\nmod ok;\nfn main() {}\n",
+            &dir.0.join("pkg"),
+        )
+        .unwrap();
+        assert!(!expanded.source.contains("SECRET"));
+        assert!(expanded.source.contains("mod leak;"));
+        assert!(expanded.source.contains("pub fn ok() {}"));
+        assert_eq!(expanded.outside, ["leak"]);
+        assert!(expanded.missing.is_empty());
     }
 
     #[test]

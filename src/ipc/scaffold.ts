@@ -69,16 +69,21 @@ export function stopScaffold(): Promise<void> {
   return invoke<void>("stop_scaffold");
 }
 
-// 予約の間の知らせ（Phase 43。D-267）。start は UNIX 時間の秒。attempt は読み直しの何回目か
+// 予約の間の知らせ（Phase 43。D-267）。start は UNIX 時間の秒（開始が遅れたときは、読み直した開始時刻でもう一度来る。B-4）。
+// attempt は読み直しの何回目か
 export type ReserveEvent =
   | { type: "waiting"; start: number }
   | { type: "retrying"; attempt: number; wait: number; message: string }
+  // ほかのコンテストを作っている途中なので、終わるのを待っている（B-5）
+  | { type: "waitingScaffold" }
   | { type: "creating" };
 
 // 開始前のコンテストを予約する。Rust 側が開始の 1 秒後まで待ち、「コンテストを作る」と同じに作る。
-// 作り終えるまで返らない。取り消したら null。作り始めたあとの経過は onEvent で受け取る
+// 作り終えるまで返らない。取り消したら null。作り始めたあとの経過は onEvent で受け取る。
+// token は予約ごとに画面が作る番号（取り消すときに渡す。始める前に取り消されても、始めない。B-2）
 export function reserveContest(
   contest: string,
+  token: number,
   onWait: (event: ReserveEvent) => void,
   onEvent: (event: ScaffoldEvent) => void,
 ): Promise<ContestCreated | null> {
@@ -86,12 +91,19 @@ export function reserveContest(
   wait.onmessage = onWait;
   const channel = new Channel<ScaffoldEvent>();
   channel.onmessage = onEvent;
-  return invoke<ContestCreated | null>("reserve_contest", { contest, onWait: wait, onEvent: channel });
+  return invoke<ContestCreated | null>("reserve_contest", { contest, token, onWait: wait, onEvent: channel });
 }
 
-// 予約を取り消す（作っている途中なら止める）。予約がなければ何もしない
-export function cancelReservation(): Promise<void> {
-  return invoke<void>("cancel_reservation");
+// 番号 token の予約を取り消す（作っている途中なら止める。まだ始まっていなければ始めない）
+export function cancelReservation(token: number): Promise<void> {
+  return invoke<void>("cancel_reservation", { token });
+}
+
+// 予約の番号（アプリを開いている間、重ならない整数）
+let lastToken = 0;
+export function newReservationToken(): number {
+  lastToken = Math.max(lastToken + 1, Date.now());
+  return lastToken;
 }
 
 // 作ったパッケージで開くファイル（Rust は src/main.rs、C++ は main.cpp、Python は main.py）

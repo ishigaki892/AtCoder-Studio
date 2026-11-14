@@ -27,6 +27,10 @@ pub const SESSION_EVENT: &str = "atcoder-session";
 
 // 圧縮して受け取るときの大きさの上限（D-233）
 const MAX_COMPRESSED_BYTES: &str = "20000000";
+// 読む出力（見出しと、展開したあとの本文）の大きさの上限。--max-filesize は受け取る（圧縮した）大きさにしか効かないので、
+// 展開したあとの大きさはここで抑える（V-5）。圧縮して受け取るもの（順位表。展開後 50 MB まで）と、それ以外（8 MB まで）
+const MAX_OUTPUT_COMPRESSED: u64 = 60_000_000;
+const MAX_OUTPUT_PLAIN: u64 = 9_000_000;
 
 pub const NOT_LOGGED_IN: &str =
     "AtCoder にログインしていません。「提出結果」タブの「ログイン」からログインしてください";
@@ -376,17 +380,49 @@ impl Client {
             .ok_or_else(|| "curl に渡せません".to_string())?
             .write_all(config.as_bytes())
             .map_err(|error| format!("curl に渡せません：{error}"))?;
-        let output = child
-            .wait_with_output()
-            .map_err(|error| format!("curl が終わりません：{error}"))?;
-        if !output.status.success() {
-            return Err(curl_failure(
-                "AtCoder につながりません",
-                output.status.code(),
-                &String::from_utf8_lossy(&output.stderr),
+        // 標準エラーは別のスレッドで読み、標準出力は上限まで読む（超えたら止める。V-5）
+        let mut stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| "curl が終わりません".to_string())?;
+        let errors = std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let _ = std::io::Read::read_to_end(
+                &mut std::io::Read::take(&mut stderr, 64 * 1024),
+                &mut bytes,
+            );
+            bytes
+        });
+        let limit = if compressed {
+            MAX_OUTPUT_COMPRESSED
+        } else {
+            MAX_OUTPUT_PLAIN
+        };
+        let mut stdout = Vec::new();
+        if let Some(out) = child.stdout.take() {
+            let _ =
+                std::io::Read::read_to_end(&mut std::io::Read::take(out, limit + 1), &mut stdout);
+        }
+        if stdout.len() as u64 > limit {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!(
+                "AtCoder からの応答が大きすぎるので読みません（{} MB を超えています）",
+                limit / 1_000_000
             ));
         }
-        let text = String::from_utf8_lossy(&output.stdout);
+        let status = child
+            .wait()
+            .map_err(|error| format!("curl が終わりません：{error}"))?;
+        let stderr = errors.join().unwrap_or_default();
+        if !status.success() {
+            return Err(curl_failure(
+                "AtCoder につながりません",
+                status.code(),
+                &String::from_utf8_lossy(&stderr),
+            ));
+        }
+        let text = String::from_utf8_lossy(&stdout);
         Ok(split_response(&text))
     }
 }

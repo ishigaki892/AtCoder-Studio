@@ -13,21 +13,32 @@ pub const START_DELAY_MS: i64 = 1000;
 pub const MAX_AHEAD_SECS: i64 = 24 * 3600;
 // 問題の一覧を読めなかったときに、次に読むまでの間（秒）。初めの 1 回と合わせて 5 回読む
 pub const RETRY_WAITS: [u64; 4] = [5, 10, 20, 40];
+// 読み直しても問題の一覧を読めないときに、開催期間を読み直して待ち直す回数の上限（開始が遅れたとき。B-4）
+pub const MAX_PERIOD_REREADS: usize = 2;
 // 待つスレッドが起きて確かめる間隔の上限（取り消しに早く気づく。眠っていた間も、時計で確かめ直す）
 const STEP: Duration = Duration::from_millis(500);
 
-// 今の予約。取り消すたびに generation を進め、前の予約を待つスレッドは止まる
+// 今の予約。取り消すたびに generation を進め、前の予約を待つスレッドは止まる。
+// token は画面が予約ごとに作る番号。始める前（開催期間を読んでいる間）に取り消された番号は cancelled に覚え、
+// その予約は始めない（docs/bug-review-2026-11-14.md の B-2）
 struct State {
     contest: Option<String>,
+    token: u64,
     generation: u64,
     // 開始して、作っている途中
     creating: bool,
+    cancelled: Vec<u64>,
 }
+
+// 覚えておく、始める前に取り消された番号の数
+const MAX_CANCELLED: usize = 16;
 
 static STATE: Mutex<State> = Mutex::new(State {
     contest: None,
+    token: 0,
     generation: 0,
     creating: false,
+    cancelled: Vec::new(),
 });
 
 fn state() -> std::sync::MutexGuard<'static, State> {
@@ -55,18 +66,27 @@ pub fn check(start: i64, end: i64, now: i64) -> Result<(), String> {
     Ok(())
 }
 
-// 予約を始める（1 つだけ）。予約の世代を返す
-pub fn begin(contest: &str) -> Result<u64, String> {
+// 予約を始める（1 つだけ）。予約の世代を返す。始める前に取り消された番号なら None
+pub fn begin(contest: &str, token: u64) -> Result<Option<u64>, String> {
     let mut state = state();
+    if let Some(at) = state
+        .cancelled
+        .iter()
+        .position(|cancelled| *cancelled == token)
+    {
+        state.cancelled.remove(at);
+        return Ok(None);
+    }
     if let Some(reserved) = &state.contest {
         return Err(format!(
             "{reserved} を予約しています。予約は 1 つだけです。取り消してから予約してください"
         ));
     }
     state.contest = Some(contest.to_string());
+    state.token = token;
     state.generation += 1;
     state.creating = false;
-    Ok(state.generation)
+    Ok(Some(state.generation))
 }
 
 // 予約がまだ生きているか
@@ -83,10 +103,19 @@ pub fn set_creating(generation: u64) {
     }
 }
 
-// 予約を取り消す。予約がなければ None、あれば作っている途中か
-pub fn cancel() -> Option<bool> {
+// 番号 token の予約を取り消す。その予約がまだ始まっていなければ、番号を覚えておく（始めない）。
+// 取り消した予約がなければ None、あれば作っている途中か
+pub fn cancel(token: u64) -> Option<bool> {
     let mut state = state();
-    state.contest.as_ref()?;
+    if state.contest.is_none() || state.token != token {
+        if !state.cancelled.contains(&token) {
+            state.cancelled.push(token);
+            if state.cancelled.len() > MAX_CANCELLED {
+                state.cancelled.remove(0);
+            }
+        }
+        return None;
+    }
     let creating = state.creating;
     state.contest = None;
     state.generation += 1;
@@ -186,28 +215,35 @@ mod tests {
     #[test]
     fn reserves_only_one_and_cancels() {
         // 予約の状態はアプリで 1 つなので、このテストの中だけで確かめる
-        assert_eq!(cancel(), None);
-        let first = begin("abc480").unwrap();
+        let first = begin("abc480", 1).unwrap().unwrap();
         assert!(active(first));
         assert!(
-            begin("abc481")
+            begin("abc481", 2)
                 .unwrap_err()
                 .contains("abc480 を予約しています")
         );
+        // 別の番号では取り消さない（その番号を覚えるだけ）
+        assert_eq!(cancel(99), None);
+        assert!(active(first));
         // 待っている間の取り消し
-        assert_eq!(cancel(), Some(false));
+        assert_eq!(cancel(1), Some(false));
         assert!(!active(first));
         // 作っている途中の取り消し
-        let second = begin("abc481").unwrap();
+        let second = begin("abc481", 3).unwrap().unwrap();
         set_creating(second);
-        assert_eq!(cancel(), Some(true));
+        assert_eq!(cancel(3), Some(true));
         // 終えたら予約は消える。取り消したあとの終わりは、次の予約を消さない
-        let third = begin("abc482").unwrap();
+        let third = begin("abc482", 4).unwrap().unwrap();
         drop(Finish(second));
         assert!(active(third));
         drop(Finish(third));
         assert!(!active(third));
-        assert_eq!(cancel(), None);
+        // 始める前に取り消された番号の予約は始めない（B-2）。次の番号はふつうに始まる
+        assert_eq!(cancel(5), None);
+        assert_eq!(begin("abc483", 5).unwrap(), None);
+        let sixth = begin("abc483", 6).unwrap().unwrap();
+        assert_eq!(cancel(6), Some(false));
+        assert!(!active(sixth));
     }
 
     #[test]

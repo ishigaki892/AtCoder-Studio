@@ -112,6 +112,8 @@ export type TaskStatus = {
   title: string;
   // AC の提出がある
   accepted: boolean;
+  // いちばん新しい AC の提出日時（UNIX 時間の秒。分からなければ null。B-1）
+  lastAcceptedAt: number | null;
   // いちばん新しい提出の判定と ID（提出がなければ null）
   last: string | null;
   lastId: number | null;

@@ -34,7 +34,9 @@ fn find_cargo_in(
     homebrew: &[PathBuf],
 ) -> Option<PathBuf> {
     let from_path = path.and_then(|paths| {
+        // 相対パスの項目は使わない（V-4）
         std::env::split_paths(paths)
+            .filter(|dir| dir.is_absolute())
             .map(|dir| dir.join("cargo"))
             .find(|path| path.is_file())
     });

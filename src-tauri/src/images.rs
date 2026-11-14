@@ -33,8 +33,20 @@ pub struct ImageRef {
     pub name: String,
 }
 
+// URL の途中（フォルダの部分）の短いハッシュ（FNV-1a 64 ビットの下 32 ビット）。保存の名前に付けて、同じコンテストで
+// 場所の違う同じ名前の画像を取り違えないようにする（docs/bug-review-2026-11-14.md の B-7）
+fn folder_hash(folder: &str) -> u32 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in folder.bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash as u32
+}
+
 // src が https://img.atcoder.jp/… で、最後の部分が「英数字・_・-（100 文字まで）＋ .png／.jpg／.jpeg／.gif／.webp」の
-// ときだけ取得する。? や # が付いたもの・途中に .. などがあるものは取得しない
+// ときだけ取得する。? や # が付いたもの・途中に .. などがあるものは取得しない。
+// 保存の名前は「<名前>-<フォルダの部分のハッシュ>.<拡張子>」
 pub fn image_ref(src: &str) -> Option<ImageRef> {
     let path = src.strip_prefix(HOST)?;
     if path.contains(['?', '#', '\\', '%'])
@@ -55,9 +67,10 @@ pub fn image_ref(src: &str) -> Option<ImageRef> {
     if !name_ok || !["png", "jpg", "jpeg", "gif", "webp"].contains(&extension.as_str()) {
         return None;
     }
+    let folder = path.rsplit_once('/').map_or("", |(folder, _)| folder);
     Some(ImageRef {
         url: src.to_string(),
-        name: format!("{stem}.{extension}"),
+        name: format!("{stem}-{:08x}.{extension}", folder_hash(folder)),
     })
 }
 
@@ -250,11 +263,33 @@ mod tests {
         ProblemId::new("abc481", "abc481_b").unwrap()
     }
 
+    // https://img.atcoder.jp/abc481/<file> の保存先（アプリのフォルダからの相対）
+    fn saved(file: &str) -> String {
+        format!(
+            "problems/abc481/images/{}",
+            image_ref(&format!("https://img.atcoder.jp/abc481/{file}"))
+                .unwrap()
+                .name
+        )
+    }
+
     #[test]
     fn accepts_only_atcoder_image_urls() {
         let ok = image_ref("https://img.atcoder.jp/abc481/6b091bccaf9c134909377119703ded9f.PNG")
             .unwrap();
-        assert_eq!(ok.name, "6b091bccaf9c134909377119703ded9f.png");
+        // 名前のあとに、フォルダの部分（abc481）のハッシュが付く
+        assert_eq!(
+            ok.name,
+            format!(
+                "6b091bccaf9c134909377119703ded9f-{:08x}.png",
+                folder_hash("abc481")
+            )
+        );
+        // 場所が違えば、同じ名前の画像でも保存の名前が違う（B-7）
+        assert_ne!(
+            image_ref("https://img.atcoder.jp/a/x.png").unwrap().name,
+            image_ref("https://img.atcoder.jp/b/x.png").unwrap().name
+        );
         for src in [
             "http://img.atcoder.jp/abc481/a.png",
             "https://img.atcoder.jp.example.com/a.png",
@@ -336,8 +371,8 @@ mod tests {
                 "https://img.atcoder.jp/abc481/fake.png"
             ]
         );
-        assert!(dir.0.join("problems/abc481/images/a.png").is_file());
-        assert!(!dir.0.join("problems/abc481/images/fake.png").exists());
+        assert!(dir.0.join(saved("a.png")).is_file());
+        assert!(!dir.0.join(saved("fake.png")).exists());
         let (out, pending) = render(&dir.0, &id(), html, FAILED_NOTE);
         assert!(pending);
         let data = format!("<img src=\"data:image/png;base64,{}\"", base64(PNG));
@@ -354,7 +389,7 @@ mod tests {
         .unwrap();
         assert_eq!(again, 1);
         // 保存したファイルが画像でなくなっていたら使わない
-        std::fs::write(dir.0.join("problems/abc481/images/a.png"), b"not an image").unwrap();
+        std::fs::write(dir.0.join(saved("a.png")), b"not an image").unwrap();
         assert!(!render(&dir.0, &id(), html, FAILED_NOTE).0.contains("data:"));
     }
 
@@ -382,7 +417,7 @@ mod tests {
         let mut big = PNG.to_vec();
         big.resize(MAX_IMAGE_BYTES as usize + 1, 0);
         fetch_missing(&big_dir.0, &id(), &html, &mut |_| Ok(big.clone())).unwrap();
-        assert!(!big_dir.0.join("problems/abc481/images/i0.png").exists());
+        assert!(!big_dir.0.join(saved("i0.png")).exists());
         // 通信の失敗のあとは読まない
         let net_dir = TempDir::new("network");
         let mut asked = 0;

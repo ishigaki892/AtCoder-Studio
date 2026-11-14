@@ -398,7 +398,8 @@ pub fn summarize(standings: &StandingsJson, user: Option<&str>, kind: Kind, star
 // ---- バーチャル参加（Phase 44。D-268） ----
 
 // ペナルティ 1 つあたりの時間（秒）を、順位表から求める。ペナルティのある行で
-// （合計の時間 − 最後に得点を取った時刻）÷ ペナルティの数。いちばん多い値。求められなければ None
+// （合計の時間 − 最後に得点を取った時刻）÷ ペナルティの数。いちばん多い値（ペナルティの時間がないコンテストは 0）。
+// ペナルティのある行がなければ None
 pub fn penalty_seconds(standings: &StandingsJson) -> Option<i64> {
     let mut counts: HashMap<i64, usize> = HashMap::new();
     let with_penalty = standings
@@ -416,14 +417,12 @@ pub fn penalty_seconds(standings: &StandingsJson) -> Option<i64> {
             continue;
         };
         let extra = row.total_result.elapsed - last;
-        if extra <= 0 {
+        if extra < 0 {
             continue;
         }
-        // ナノ秒を秒に（四捨五入）
+        // ナノ秒を秒に（四捨五入）。ペナルティの時間がないコンテストは 0 秒（B-3）
         let seconds = (extra / row.total_result.penalty + 500_000_000) / 1_000_000_000;
-        if seconds > 0 {
-            *counts.entry(seconds).or_default() += 1;
-        }
+        *counts.entry(seconds).or_default() += 1;
     }
     counts
         .into_iter()
@@ -1022,6 +1021,12 @@ mod tests {
             penalty_seconds(&standings(true, &["x_a"], &rows[..1])),
             None
         );
+        // ペナルティの時間がないコンテスト：誤答があっても合計の時間が最後に得点を取った時刻と同じ（B-3）
+        let free = [
+            timed_row("p", true, 60000.0, 1700, 1, 1700),
+            timed_row("q", true, 60000.0, 1400, 2, 1400),
+        ];
+        assert_eq!(penalty_seconds(&standings(true, &["x_a"], &free)), Some(0));
         // 600 点・2000 秒：a だけが上。b・c と同じ
         let place = virtual_place(&data, Kind::Rated(ABC), 1_700_000_000, 60000.0, 2000);
         assert_eq!((place.rank, place.participants), (2, 6));

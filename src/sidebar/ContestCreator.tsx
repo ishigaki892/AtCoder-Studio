@@ -4,6 +4,7 @@ import {
   createContestPackages,
   describePackage,
   mainFile,
+  newReservationToken,
   reserveContest,
   stopScaffold,
   type ContestCreated,
@@ -41,6 +42,8 @@ type Phase =
 // 予約して、開始を待っている（待っている間も、ほかのコンテストを作れる）。retry は読み直しを待っているときの知らせ
 type Reservation = {
   contest: string;
+  // 取り消すときに渡す番号（B-2）
+  token: number;
   start: number;
   retry: string | null;
   loggedOut: boolean;
@@ -54,8 +57,8 @@ type Props = {
   initialContest: string;
   // 作り終えた（止めたときも）。first は、作れた最初の問題の src/main.rs（なければ null）
   onCreated: (first: string | null) => void;
-  // 予約した・予約が終わった（null）。ツールバーに予約を出すのに使う
-  onReserve: (contest: string | null) => void;
+  // 予約した・予約が終わった（null）。ツールバーに予約を出すのに使う。token は取り消すときに渡す番号
+  onReserve: (reservation: { contest: string; token: number } | null) => void;
   onClose: () => void;
 };
 
@@ -111,8 +114,8 @@ function ContestCreator({ hidden, initialContest, onCreated, onReserve, onClose 
   const [reservation, setReservation] = useState<Reservation | null>(null);
   const running = phase.kind === "running";
   const inputRef = useRef<HTMLInputElement>(null);
-  // 予約している（閉じる・フォルダを変えるなどで、この部品がなくなるときに取り消す）
-  const reservedRef = useRef(false);
+  // 予約の番号（閉じる・フォルダを変えるなどで、この部品がなくなるときに取り消す）。予約していなければ null
+  const reservedRef = useRef<number | null>(null);
   // 今の「作っている」は予約から始めたもの（止めるときは予約を取り消す）
   const fromReservationRef = useRef(false);
   const onReserveRef = useRef(onReserve);
@@ -127,9 +130,9 @@ function ContestCreator({ hidden, initialContest, onCreated, onReserve, onClose 
 
   useEffect(
     () => () => {
-      if (reservedRef.current) {
-        reservedRef.current = false;
-        cancelReservation().catch(() => {});
+      if (reservedRef.current !== null) {
+        cancelReservation(reservedRef.current).catch(() => {});
+        reservedRef.current = null;
         onReserveRef.current(null);
       }
     },
@@ -180,13 +183,15 @@ function ContestCreator({ hidden, initialContest, onCreated, onReserve, onClose 
   }
 
   async function reserve(id: string, start: number) {
+    const token = newReservationToken();
     setPhase({ kind: "idle" });
-    setReservation({ contest: id, start, retry: null, loggedOut: false, cancelling: false });
-    reservedRef.current = true;
-    onReserve(id);
+    setReservation({ contest: id, token, start, retry: null, loggedOut: false, cancelling: false });
+    reservedRef.current = token;
+    onReserve({ contest: id, token });
     try {
       const created = await reserveContest(
         id,
+        token,
         (event) => {
           switch (event.type) {
             case "waiting":
@@ -198,7 +203,16 @@ function ContestCreator({ hidden, initialContest, onCreated, onReserve, onClose 
                   }
                 })
                 .catch(() => {});
-              setReservation((current) => current && { ...current, start: event.start });
+              // 開始が遅れて、読み直した開始時刻で待ち直すときも来る（B-4）
+              setReservation(
+                (current) =>
+                  current && {
+                    ...current,
+                    start: event.start,
+                    retry:
+                      event.start !== current.start ? "開始が遅れたので、新しい開始時刻まで待ちます" : current.retry,
+                  },
+              );
               break;
             case "retrying":
               setReservation(
@@ -207,6 +221,12 @@ function ContestCreator({ hidden, initialContest, onCreated, onReserve, onClose 
                     ...current,
                     retry: `問題の一覧をまだ読めません（${event.message}）。${event.wait} 秒あとに読み直します（${event.attempt} 回目）`,
                   },
+              );
+              break;
+            case "waitingScaffold":
+              setReservation(
+                (current) =>
+                  current && { ...current, retry: "ほかのコンテストを作っているので、作り終えるのを待っています" },
               );
               break;
             case "creating":
@@ -227,7 +247,7 @@ function ContestCreator({ hidden, initialContest, onCreated, onReserve, onClose 
     } catch (e) {
       setPhase({ kind: "error", message: String(e) });
     } finally {
-      reservedRef.current = false;
+      reservedRef.current = null;
       fromReservationRef.current = false;
       setReservation(null);
       onReserve(null);
@@ -237,12 +257,16 @@ function ContestCreator({ hidden, initialContest, onCreated, onReserve, onClose 
   function stop() {
     setPhase((current) => (current.kind === "running" ? { ...current, stopping: true } : current));
     // 予約から作っているときは、取り消すと止まる
-    (fromReservationRef.current ? cancelReservation() : stopScaffold()).catch(() => {});
+    const token = reservedRef.current;
+    (fromReservationRef.current && token !== null ? cancelReservation(token) : stopScaffold()).catch(() => {});
   }
 
   function cancel() {
-    setReservation((current) => current && { ...current, cancelling: true });
-    cancelReservation().catch(() => {});
+    if (!reservation) {
+      return;
+    }
+    setReservation({ ...reservation, cancelling: true });
+    cancelReservation(reservation.token).catch(() => {});
   }
 
   return (

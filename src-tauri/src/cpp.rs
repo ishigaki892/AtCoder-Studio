@@ -122,7 +122,9 @@ fn find_compiler_in(path_var: Option<&OsStr>, brews: &[PathBuf]) -> Option<PathB
     let name = "g++-15";
     let in_path = || {
         path_var.and_then(|paths| {
+            // 相対パスの項目は使わない（V-4）
             std::env::split_paths(paths)
+                .filter(|dir| dir.is_absolute())
                 .map(|dir| dir.join(name))
                 .find(|candidate| candidate.is_file())
         })

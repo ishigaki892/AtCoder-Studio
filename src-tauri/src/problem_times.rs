@@ -30,6 +30,10 @@ pub struct ProblemTime {
     // AC が分かったときの時間（秒）。あれば、それより先は数えない
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ac_seconds: Option<u64>,
+    // 数え始めた時刻（UNIX 時間の秒。「⟲」で今にする）。これより後の AC だけで止める。Phase 42 の記録にはない
+    // （docs/bug-review-2026-11-14.md の B-1）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<u64>,
 }
 
 pub type Times = BTreeMap<String, ProblemTime>;
@@ -47,7 +51,7 @@ fn parse(value: Value) -> Option<Times> {
             .filter(|(id, time)| {
                 problem::valid_id(id)
                     && valid(time)
-                    && (time.seconds > 0 || time.ac_seconds.is_some())
+                    && (time.seconds > 0 || time.ac_seconds.is_some() || time.started_at.is_some())
             })
             .collect(),
     )
@@ -67,7 +71,7 @@ pub fn load(dir: &Path) -> Result<(Times, Option<PathBuf>), String> {
     read(dir)
 }
 
-// 1 問の時間を書く。0 秒で AC もなければ消す（数え直し）
+// 1 問の時間を書く。0 秒で AC も数え始めた時刻もなければ消す
 pub fn set(dir: &Path, id: &str, time: ProblemTime) -> Result<(Times, Option<PathBuf>), String> {
     if !problem::valid_id(id) {
         return Err("問題の ID が正しくありません".to_string());
@@ -77,7 +81,7 @@ pub fn set(dir: &Path, id: &str, time: ProblemTime) -> Result<(Times, Option<Pat
     }
     let _guard = LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let (mut times, backup) = read(dir)?;
-    if time.seconds == 0 && time.ac_seconds.is_none() {
+    if time.seconds == 0 && time.ac_seconds.is_none() && time.started_at.is_none() {
         times.remove(id);
     } else {
         times.insert(id.to_string(), time);
@@ -117,6 +121,7 @@ mod tests {
         ProblemTime {
             seconds,
             ac_seconds,
+            started_at: None,
         }
     }
 
@@ -140,6 +145,14 @@ mod tests {
         // 0 秒で AC もなければ消す（数え直し）
         let (times, _) = set(&dir.0, "abc001_1", time(0, None)).unwrap();
         assert_eq!(times.keys().collect::<Vec<_>>(), ["abc002_1"]);
+        // 「⟲」：0 秒でも、数え始めた時刻があれば残す（前に AC した問題を数え直す。B-1）
+        let restarted = ProblemTime {
+            started_at: Some(1_800_000_000),
+            ..time(0, None)
+        };
+        let (times, _) = set(&dir.0, "abc001_1", restarted).unwrap();
+        assert_eq!(times.get("abc001_1"), Some(&restarted));
+        assert_eq!(load(&dir.0).unwrap().0.get("abc001_1"), Some(&restarted));
     }
 
     #[test]
