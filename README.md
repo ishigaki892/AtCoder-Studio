@@ -63,7 +63,7 @@ AtCoder の問題を Rust・C++・Python で解くための macOS 向けデス�
 | 言語 | 手元の環境 | 提出時の言語 |
 |---|---|---|
 | Rust | rustup の Rust | 「Rust」で始まるもの |
-| C++ | Homebrew の GCC（`g++-15`） | C++23 (GCC 15.2.0) |
+| C++ | Homebrew の GCC（`g++-15`。新しい版でも動きます） | C++23 (GCC 15.2.0) |
 | Python | CPython 3.13 または PyPy 3.11 | Python (CPython 3.13.7) / Python (PyPy 3.11-v7.3.20) |
 
 ## 動作環境・必要なもの
@@ -75,7 +75,7 @@ AtCoder の問題を Rust・C++・Python で解くための macOS 向けデス�
 | 用途 | 必要なもの | 入れ方 |
 |---|---|---|
 | Rust | rustup でインストールした Rust | [rustup](https://rustup.rs) |
-| C++ | Homebrew の GCC（`g++-15`） | `brew install gcc` |
+| C++ | Homebrew の GCC（`g++-15`。ない場合は `g++-16` などの新しい版を使います） | `brew install gcc@15` |
 | Python | Homebrew の Python（CPython 3.13 または PyPy 3.11） | `brew install python@3.13`（PyPy の場合は `brew install pypy3.11`） |
 | Python のコード補完等 | basedpyright | `brew install basedpyright` |
 | Python の整形 | ruff | `brew install ruff` |

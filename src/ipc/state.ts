@@ -94,6 +94,8 @@ export type ProblemSettings = {
   language: Language;
   // 問題文の欄に、問題ごとの経過時間を出して数える（Phase 42。D-266。既定はオン）
   timer: boolean;
+  // Python の入力のコードの変数の名前を小文字にする（D-273。既定はオフ＝問題文のまま）
+  pythonLowercase: boolean;
 };
 
 // 選べる言語と、画面に出す名前（D-208）
@@ -124,6 +126,7 @@ export const DEFAULT_PROBLEM_SETTINGS: ProblemSettings = {
   fillInput: false,
   language: "rust",
   timer: true,
+  pythonLowercase: false,
 };
 
 // settings.json の python の欄（Phase 19。D-221）。パスが空なら探す。設定の画面は処理系だけを変える

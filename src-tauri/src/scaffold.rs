@@ -46,10 +46,12 @@ pub struct Template {
     pub fill: Option<FillInput>,
 }
 
-// 問題を作るときに input! を入れる（D-198）。main_loop はテストケースが複数のとき main() に for まで書くか（D-197）
+// 問題を作るときに input! を入れる（D-198）。main_loop はテストケースが複数のとき main() に for まで書くか（D-197）。
+// python_lowercase は Python の変数の名前を小文字にするか（D-273）
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FillInput {
     pub main_loop: bool,
+    pub python_lowercase: bool,
 }
 
 // 雛形のファイルがあるか（設定の画面の「テンプレート」に出す。Phase 13 作業 3。D-188）
@@ -330,10 +332,11 @@ fn initial_main(problem: &Problem, template: &Template) -> (String, Option<Strin
     };
     match template.fill {
         None => (source.clone(), None),
-        Some(fill) => match input_gen::generate_for(
+        Some(fill) => match input_gen::generate_styled(
             &problem.statement_html,
             &problem.samples,
             template.language,
+            fill.python_lowercase,
         )
         .and_then(|generated| {
             let text = match template.language {
@@ -971,7 +974,10 @@ mod tests {
         let load = |_: &ProblemId| Ok(sample.clone());
         // 入：solve() の input! が作ったものになり、知らせる
         let id = ProblemId::new("abc480", "abc480_a").unwrap();
-        let on = Some(FillInput { main_loop: false });
+        let on = Some(FillInput {
+            main_loop: false,
+            python_lowercase: false,
+        });
         let created = create_problem(&root.0, &id, &template(on), &load).unwrap();
         assert_eq!(
             created.package.input.as_deref(),
@@ -1021,7 +1027,10 @@ mod tests {
         let root = TempDir::new("fill-cpp");
         let app = TempDir::new("fill-cpp-template");
         let mut template = load_template(&app.0, Language::Cpp).unwrap();
-        template.fill = Some(FillInput { main_loop: false });
+        template.fill = Some(FillInput {
+            main_loop: false,
+            python_lowercase: false,
+        });
         let mut sample = problem(&[("2\n3 4\n", "7\n")]);
         sample.statement_html = "<section><h3>制約</h3><ul><li><var>1 \\leq N, A_i \\leq 10</var></li></ul></section>\
              <section><h3>入力</h3><pre><var>N</var>\n<var>A_1</var> <var>\\ldots</var> <var>A_N</var></pre></section>"
@@ -1181,7 +1190,10 @@ mod tests {
         let app = TempDir::new("python-template");
         let mut template = load_template(&app.0, Language::Python).unwrap();
         assert_eq!(template.main_py, DEFAULT_MAIN_PY);
-        template.fill = Some(FillInput { main_loop: false });
+        template.fill = Some(FillInput {
+            main_loop: false,
+            python_lowercase: false,
+        });
         let mut sample = problem(&[("1 2\n", "3\n")]);
         sample.statement_html =
             "<section><h3>入力</h3><pre><var>A</var> <var>B</var></pre></section>".to_string();
@@ -1717,7 +1729,10 @@ mod tests {
         let root = TempDir::new("restart-fill");
         let app = TempDir::new("restart-fill-template");
         let mut template = load_template(&app.0, Language::Cpp).unwrap();
-        template.fill = Some(FillInput { main_loop: false });
+        template.fill = Some(FillInput {
+            main_loop: false,
+            python_lowercase: false,
+        });
         let mut sample = problem(&[("3\n", "3\n")]);
         sample.statement_html =
             "<section><h3>入力</h3><pre><var>N</var></pre></section>".to_string();
@@ -1770,7 +1785,10 @@ mod tests {
         let root = TempDir::new("random-programs");
         let app = TempDir::new("random-programs-template");
         let mut template = load_template(&app.0, Language::Rust).unwrap();
-        template.fill = Some(FillInput { main_loop: false });
+        template.fill = Some(FillInput {
+            main_loop: false,
+            python_lowercase: false,
+        });
         let mut sample = problem(&[("3\n1 2 3\n", "6\n")]);
         sample.statement_html = "<section><h3>制約</h3><ul><li><var>1 \\leq N \\leq 10</var></li></ul></section>\
              <section><h3>入力</h3><pre><var>N</var>\n<var>A_1</var> <var>\\ldots</var> <var>A_N</var></pre></section>"

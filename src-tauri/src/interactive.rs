@@ -1115,7 +1115,7 @@ fn main() {
         assert_eq!(diagnostics["items"][0]["file"], "examples/judge.rs");
     }
 
-    // C++ の解答とジャッジを g++-15 でビルドしてつなぐ（Phase 17 作業 7。D-212）。g++-15 が要る
+    // C++ の解答とジャッジを g++ でビルドしてつなぐ（Phase 17 作業 7。D-212）。GCC が要る
     const CPP_JUDGE: &str = r#"#include <bits/stdc++.h>
 using namespace std;
 int main(int argc, char** argv) {
@@ -1153,7 +1153,7 @@ int main() {
     fn connects_cpp_programs() {
         let cpp = LangSettings::default();
         if crate::cpp::find_compiler(&cpp.cpp).is_err() {
-            eprintln!("g++-15 がないので飛ばします");
+            eprintln!("g++ が見つからないので飛ばします");
             return;
         }
         let ws = workspace("cpp");

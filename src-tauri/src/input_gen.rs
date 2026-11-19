@@ -1221,7 +1221,7 @@ fn render(items: &[(String, Kind)]) -> Vec<String> {
 // 問題文（日本語の HTML）とサンプルから、input! の中身を作る（テストで使う。ほかは generate_for で言語を選ぶ）
 #[cfg(test)]
 pub fn generate(statement_html: &str, samples: &[Sample]) -> Result<Generated, String> {
-    generate_for(statement_html, samples, Language::Rust)
+    generate_styled(statement_html, samples, Language::Rust, false)
 }
 
 // language の書き方で作る（C++ は宣言と cin の行。D-213。Python は行ごとに input() で読む行。D-227）
@@ -1256,10 +1256,23 @@ fn read_sections(statement_html: &str) -> Result<(Vec<PreLines>, Vec<String>), S
     Ok((pres, constraints))
 }
 
-pub fn generate_for(
+// 名前の決め方が既定のもの（テストで使う）
+#[cfg(test)]
+fn generate_for(
     statement_html: &str,
     samples: &[Sample],
     language: Language,
+) -> Result<Generated, String> {
+    generate_styled(statement_html, samples, language, false)
+}
+
+// python_lowercase なら、Python の変数の名前を小文字にする（`N` → `n`、`S_X` → `s_x`。設定の problem.pythonLowercase。
+// D-273）。Rust はもともと小文字、C++ は問題文のままなので、Python のときだけ効く
+pub fn generate_styled(
+    statement_html: &str,
+    samples: &[Sample],
+    language: Language,
+    python_lowercase: bool,
 ) -> Result<Generated, String> {
     let (pres, constraints) = read_sections(statement_html)?;
     let first = &pres[0];
@@ -1334,6 +1347,9 @@ pub fn generate_for(
             )
         }
         Language::Python => {
+            if python_lowercase {
+                cpp.lowercase();
+            }
             renamed = cpp.avoid_keywords();
             (
                 cpp.render_python(&body.items, &cpp.solve, &body.layouts),
@@ -2085,6 +2101,8 @@ struct CppNames {
     lens: HashMap<String, String>,
     // 末尾に `_` を付ける名前（その言語の予約語など）
     keywords: &'static [&'static str],
+    // 名前を小文字にした（Python の設定。D-273）。長さの名前も小文字で書く
+    lower: bool,
 }
 
 impl CppNames {
@@ -2112,7 +2130,22 @@ impl CppNames {
             solve: solve.to_vec(),
             lens,
             keywords,
+            lower: false,
         }
+    }
+
+    // 名前をすべて小文字にする（Python の設定。D-273）。予約語の `_` を付ける（avoid_keywords）前に呼ぶ
+    fn lowercase(&mut self) {
+        let all = self
+            .main
+            .iter_mut()
+            .chain(self.solve.iter_mut())
+            .flatten()
+            .chain(self.lens.values_mut());
+        for name in all {
+            *name = name.to_ascii_lowercase();
+        }
+        self.lower = true;
     }
 
     // 予約語と同じ名前の末尾に `_` を付ける。直した元の名前を返す
@@ -2138,7 +2171,12 @@ impl CppNames {
     }
 
     fn len(&self, len: &Len) -> String {
-        let Some(name) = len.cpp.clone().or_else(|| len.name.clone()) else {
+        let name = if self.lower {
+            len.name.clone()
+        } else {
+            len.cpp.clone().or_else(|| len.name.clone())
+        };
+        let Some(name) = name else {
             return len.offset.to_string();
         };
         let name = if self.keywords.contains(&name.as_str()) {
@@ -3711,6 +3749,115 @@ fn main() {
         assert!(
             generated.notes.contains(
                 &"Python の予約語と同じ名前は、末尾に _ を付けました：if → if_、map → map_"
+                    .to_string()
+            ),
+            "{:?}",
+            generated.notes
+        );
+    }
+
+    // Python の名前を小文字にする設定（D-273）：長さ・テストケースの数・組の列も小文字。予約語・ループの変数とのぶつかりは
+    // 小文字にしてから避ける
+    #[test]
+    fn writes_python_lowercase_names() {
+        let html = statement(
+            &[
+                "<var>N</var> <var>M</var>\n<var>A_1</var> <var>A_2</var> <var>\\ldots</var> <var>A_N</var>\n<var>X_1</var> <var>Y_1</var>\n<var>\\vdots</var>\n<var>X_M</var> <var>Y_M</var>\n<var>B_1</var>\n<var>\\vdots</var>\n<var>B_N</var>\n",
+            ],
+            &["1 \\leq N,M \\leq 10", "1 \\leq A_i,X_i,Y_i,B_i \\leq 10"],
+        );
+        let input = "3 2\n1 2 3\n1 2\n2 3\n4\n5\n6\n";
+        let generated = generate_styled(&html, &[sample(input)], Language::Python, true).unwrap();
+        assert_eq!(
+            generated.solve,
+            [
+                "n, m = map(int, input().split())",
+                "a = list(map(int, input().split()))",
+                "x = [0] * m",
+                "y = [0] * m",
+                "for i in range(m):",
+                "    x[i], y[i] = map(int, input().split())",
+                "b = [int(input()) for _ in range(n)]",
+            ]
+        );
+        assert_eq!(generated.notes, Vec::<String>::new());
+        assert_eq!(generated.samples_matched, 1);
+        let script: String = generated
+            .solve
+            .iter()
+            .map(|line| format!("{line}\n"))
+            .collect();
+        if let Some(out) = run_python(&format!("{script}print(n, m, a, x, y, b)\n"), input) {
+            assert_eq!(out, "3 2 [1, 2, 3] [1, 2] [2, 3] [4, 5, 6]\n");
+        }
+        // 設定が切なら問題文のまま。C++・Rust は設定に関係なく今までどおり
+        assert_eq!(
+            generate_styled(&html, &[], Language::Python, false)
+                .unwrap()
+                .solve[0],
+            "N, M = map(int, input().split())"
+        );
+        assert_eq!(
+            generate_styled(&html, &[], Language::Cpp, true)
+                .unwrap()
+                .solve,
+            generate_for(&html, &[], Language::Cpp).unwrap().solve
+        );
+        assert_eq!(
+            generate_styled(&html, &[], Language::Rust, true)
+                .unwrap()
+                .solve,
+            generate_for(&html, &[], Language::Rust).unwrap().solve
+        );
+
+        // テストケースの数も小文字
+        let html = statement(
+            &[
+                "<var>T</var>\n<var>\\text{case}_1</var>\n<var>\\text{case}_2</var>\n<var>\\vdots</var>\n<var>\\text{case}_T</var>",
+                "<var>N</var>\n<var>A_1</var> <var>A_2</var> <var>\\ldots</var> <var>A_N</var>",
+            ],
+            &[
+                "1 \\leq T \\leq 10",
+                "1 \\leq N \\leq 10",
+                "1 \\leq A_i \\leq 10",
+            ],
+        );
+        let generated = generate_styled(
+            &html,
+            &[sample("2\n1\n5\n3\n1 2 3\n")],
+            Language::Python,
+            true,
+        )
+        .unwrap();
+        assert_eq!(generated.main, Some(vec!["t = int(input())".to_string()]));
+        assert_eq!(
+            generated.solve,
+            ["n = int(input())", "a = list(map(int, input().split()))"]
+        );
+        assert_eq!(generated.samples_matched, 1);
+
+        // 小文字にすると予約語（IN → in）・組み込み（LIST → list）・ループの変数（I → i）とぶつかる
+        let html = statement(
+            &[
+                "<var>IN</var> <var>I</var>\n<var>LIST_1</var> <var>\\ldots</var> <var>LIST_I</var>\n<var>P_1</var> <var>Q_1</var>\n<var>\\vdots</var>\n<var>P_I</var> <var>Q_I</var>\n",
+            ],
+            &["1 \\leq IN,I \\leq 10"],
+        );
+        let generated = generate_styled(&html, &[], Language::Python, true).unwrap();
+        assert_eq!(
+            generated.solve,
+            [
+                "in_, i = map(int, input().split())",
+                "list_ = list(map(int, input().split()))",
+                "p = [0] * i",
+                "q = [0] * i",
+                "for j in range(i):",
+                "    p[j], q[j] = map(int, input().split())",
+            ]
+        );
+        assert!(
+            generated.notes.contains(
+                &"Python の予約語と同じ名前は、末尾に _ を付けました：in → in_、list → list_"
                     .to_string()
             ),
             "{:?}",

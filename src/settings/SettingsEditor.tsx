@@ -431,6 +431,7 @@ function SettingsEditor(props: Props) {
     language: hit("問題を作るときの言語", "problem.language", "Rust", "C++", "Python", "問題文"),
     fillInput: hit("input! を入れておく", "problem.fillInput", "入力のコード", "問題文"),
     mainLoop: hit("main() に for も書く", "problem.mainLoop", "テストケースが複数", "問題文"),
+    pythonLowercase: hit("Python の変数を小文字にする", "problem.pythonLowercase", "入力のコード", "小文字", "Python", "問題文"),
     timer: hit("経過時間を出す", "problem.timer", "経過時間", "時間", "問題文"),
     testFirst: hit("提出の前のサンプルテスト", "submit.testBeforeSubmit", "提出"),
     confirm: hit("提出の確認のダイアログ", "submit.confirmDialog", "提出"),
@@ -462,7 +463,7 @@ function SettingsEditor(props: Props) {
     view: show.rainbow || show.lens || show.crumbs || show.editorSize || show.problemSize || show.ui,
     keys: show.keys,
     colors: colorGroups.some((g) => g.shown),
-    problem: show.buttons || show.language || show.fillInput || show.mainLoop || show.timer,
+    problem: show.buttons || show.language || show.fillInput || show.mainLoop || show.pythonLowercase || show.timer,
     submit: show.testFirst || show.confirm,
     notify: show.judge || show.start,
     past: show.user,
@@ -776,6 +777,15 @@ function SettingsEditor(props: Props) {
               label="main() に for も書く（Rust は input! の t と for _ in 0..t { solve(); }、C++・Python は T を読む for）"
               checked={problemDraft.mainLoop}
               onChange={(on) => change(setProblemDraft, (c) => ({ ...c, mainLoop: on }))}
+            />
+          )}
+          {show.pythonLowercase && (
+            <CheckItem
+              title="Python の変数の名前"
+              jsonKey="problem.pythonLowercase"
+              label="Python の入力のコードの変数を小文字にする（N → n、S_X → s_x。予約語・組み込みと同じになる名前は末尾に _）"
+              checked={problemDraft.pythonLowercase}
+              onChange={(on) => change(setProblemDraft, (c) => ({ ...c, pythonLowercase: on }))}
             />
           )}
           {show.timer && (

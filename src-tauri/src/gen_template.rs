@@ -1315,7 +1315,7 @@ mod tests {
         assert_eq!(run_rust(&dir.0, &source, 1), [""]);
     }
 
-    // C++・Python でも同じ形の出力になる（g++-15・python3 がなければ確かめない）
+    // C++・Python でも同じ形の出力になる（g++・python3 がなければ確かめない）
     #[test]
     fn generates_cpp_and_python_too() {
         let dir = TempDir::new("cpp-python");

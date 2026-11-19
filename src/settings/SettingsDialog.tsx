@@ -712,6 +712,19 @@ function ProblemSection({
         を読むコードを入れ、solve(); を for (int i = 0; i &lt; T; i++) solve(); にします。Python では、main() に T
         を読むコードを入れ、solve() を for _ in range(T): の中にします。
       </p>
+      {/* Python の入力のコードの名前（D-273） */}
+      <label className="settings-check">
+        <input
+          type="checkbox"
+          checked={draft.pythonLowercase}
+          onChange={(event) => onChange({ ...draft, pythonLowercase: event.target.checked })}
+        />
+        Python の入力のコードの変数を小文字にする
+      </label>
+      <p className="settings-note">
+        Python の入力のコードで、変数の名前を問題文の N・A ではなく n・a にします（S_X は s_x）。小文字にすると予約語や
+        組み込みと同じになる名前（in・list など）は、末尾に _ を付けます。Rust はもともと小文字、C++ は問題文のままです。
+      </p>
       {/* 問題ごとの経過時間（Phase 42。D-266） */}
       <label className="settings-check">
         <input

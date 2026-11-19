@@ -1,7 +1,8 @@
 // C++ のビルド（Phase 16 作業 1。D-204・D-205）
 //
 // - C++ のパッケージは main.cpp のあるフォルダ。開いたファイルが main.cpp か、そのフォルダの test/ の中なら対象にする
-// - コンパイラは GCC だけ（Apple の clang では bits/stdc++.h が使えない）。設定の cpp.compiler、Homebrew、PATH の順に探す
+// - コンパイラは GCC だけ（Apple の clang では bits/stdc++.h が使えない）。設定の cpp.compiler、Homebrew、PATH の順に探す。
+//   ジャッジと同じ g++-15 がなければ、ほかの版の g++-NN のうち一番新しいものを使う（版の違いは実行ログに出る。D-272）
 // - オプションはジャッジの C++23 (GCC 15.2.0) に合わせる。ライブラリなど、手元で付けないものは実行ログで知らせる
 // - コンパイルのエラーは `<ファイル>:<行>:<列>: error:` の行を読む
 
@@ -23,7 +24,7 @@ pub const NOT_LIKE_JUDGE: &str = "手元のビルドは、ジャッジと違い 
 // 提出の確認のダイアログの注意に添える（D-209）
 pub const JUDGE_SUBMIT_NOTE: &str =
     "ジャッジは、AtCoder の 2025/10 版の言語の一覧の C++23 (GCC 15.2.0) です（2026-10-28 に確認）";
-pub const GCC_HINT: &str = "C++ には GCC が要ります（Apple の clang では bits/stdc++.h が使えません）。ターミナルで `brew install gcc` を実行して入れてください。別の場所の GCC を使うときは、settings.json の cpp.compiler に g++ のパスを書いてください";
+pub const GCC_HINT: &str = "C++ には GCC が要ります（Apple の clang では bits/stdc++.h が使えません）。ターミナルで `brew install gcc@15` を実行して入れてください（ジャッジと同じ GCC 15。`brew install gcc` で入る新しい版でも動きます）。別の場所の GCC を使うときは、settings.json の cpp.compiler に g++ のパスを書いてください";
 
 // パッケージの中のソースと、ビルドしたものの置き場所（パッケージの target/）
 pub const SOURCE: &str = "main.cpp";
@@ -96,7 +97,8 @@ pub fn target_in_package(root: &Path, dir: &Path, file: &Path) -> Option<Target>
     })
 }
 
-// 使う g++。設定があればそれだけを使う。なければ /opt/homebrew/bin/g++-15、PATH の g++-15、/usr/local/bin/g++-15 の順
+// 使う g++。設定があればそれだけを使う。なければ /opt/homebrew/bin/g++-15、PATH の g++-15、/usr/local/bin/g++-15 の順。
+// どれもなければ、同じ場所の g++-NN（Homebrew が gcc を 16 などに上げたとき）のうち、版の数が一番大きいもの（D-272）
 pub fn find_compiler(settings: &CppSettings) -> Result<PathBuf, String> {
     if !settings.compiler.is_empty() {
         let path = PathBuf::from(&settings.compiler);
@@ -115,26 +117,53 @@ pub fn find_compiler(settings: &CppSettings) -> Result<PathBuf, String> {
             PathBuf::from("/usr/local/bin"),
         ],
     )
-    .ok_or_else(|| format!("g++-15 が見つかりません。{GCC_HINT}"))
+    .ok_or_else(|| format!("GCC（g++-15 など）が見つかりません。{GCC_HINT}"))
+}
+
+// ジャッジと同じ版の g++ の名前
+const JUDGE_GXX: &str = "g++-15";
+
+// `g++-<数>` の名前なら、その数
+fn gxx_major(name: &OsStr) -> Option<u32> {
+    let digits = name.to_str()?.strip_prefix("g++-")?;
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    digits.parse().ok()
 }
 
 fn find_compiler_in(path_var: Option<&OsStr>, brews: &[PathBuf]) -> Option<PathBuf> {
-    let name = "g++-15";
-    let in_path = || {
-        path_var.and_then(|paths| {
-            // 相対パスの項目は使わない（V-4）
-            std::env::split_paths(paths)
-                .filter(|dir| dir.is_absolute())
-                .map(|dir| dir.join(name))
-                .find(|candidate| candidate.is_file())
-        })
-    };
-    let first = brews.first().map(|dir| dir.join(name));
-    let rest = brews.iter().skip(1).map(|dir| dir.join(name));
-    first
-        .filter(|path| path.is_file())
-        .or_else(in_path)
-        .or_else(|| rest.into_iter().find(|path| path.is_file()))
+    // 探す場所の順：Homebrew（/opt/homebrew/bin）、PATH（相対パスの項目は使わない。V-4）、/usr/local/bin
+    let mut dirs: Vec<PathBuf> = brews.iter().take(1).cloned().collect();
+    if let Some(paths) = path_var {
+        dirs.extend(std::env::split_paths(paths).filter(|dir| dir.is_absolute()));
+    }
+    dirs.extend(brews.iter().skip(1).cloned());
+    // ジャッジと同じ g++-15 を先に使う
+    if let Some(found) = dirs
+        .iter()
+        .map(|dir| dir.join(JUDGE_GXX))
+        .find(|path| path.is_file())
+    {
+        return Some(found);
+    }
+    // なければ、ほかの版の g++-NN のうち、版の数が一番大きいもの（同じ版なら、先に探す場所のもの）
+    let mut best: Option<(u32, PathBuf)> = None;
+    for dir in &dirs {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Some(major) = gxx_major(&entry.file_name()) else {
+                continue;
+            };
+            let path = entry.path();
+            if path.is_file() && best.as_ref().is_none_or(|(top, _)| major > *top) {
+                best = Some((major, path));
+            }
+        }
+    }
+    best.map(|(_, path)| path)
 }
 
 // 版の表示（`--version` の 1 行目）と、版の番号（`-dumpfullversion`）。GCC でなければ Err
@@ -586,6 +615,52 @@ mod tests {
         );
     }
 
+    // g++-15 がなければ、ほかの版の g++-NN のうち一番新しいもの（D-272）
+    #[test]
+    fn falls_back_to_the_newest_other_gcc() {
+        let base = TempDir::new("find-newer");
+        let (brew, path_dir, local) = (
+            base.0.join("brew"),
+            base.0.join("path"),
+            base.0.join("local"),
+        );
+        for dir in [&brew, &path_dir, &local] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        let brews = vec![brew.clone(), local.clone()];
+        let path_var = std::ffi::OsString::from(path_dir.as_os_str());
+        // g++-NN の形でない名前・フォルダは使わない
+        for name in [
+            "g++",
+            "g++-",
+            "g++-16a",
+            "aarch64-apple-darwin25-g++-16",
+            "gcc-16",
+        ] {
+            std::fs::write(brew.join(name), "").unwrap();
+        }
+        std::fs::create_dir_all(brew.join("g++-99")).unwrap();
+        assert_eq!(find_compiler_in(Some(&path_var), &brews), None);
+        std::fs::write(brew.join("g++-14"), "").unwrap();
+        std::fs::write(local.join("g++-16"), "").unwrap();
+        assert_eq!(
+            find_compiler_in(Some(&path_var), &brews),
+            Some(local.join("g++-16"))
+        );
+        // 同じ版なら、先に探す場所（Homebrew）のもの
+        std::fs::write(brew.join("g++-16"), "").unwrap();
+        assert_eq!(
+            find_compiler_in(Some(&path_var), &brews),
+            Some(brew.join("g++-16"))
+        );
+        // g++-15 があれば、新しい版より先に使う
+        std::fs::write(local.join("g++-15"), "").unwrap();
+        assert_eq!(
+            find_compiler_in(Some(&path_var), &brews),
+            Some(local.join("g++-15"))
+        );
+    }
+
     #[test]
     fn refuses_a_missing_compiler_setting() {
         for compiler in ["/nonexistent/g++-15", "g++-15"] {
@@ -796,7 +871,7 @@ compilation terminated.
         assert!(parse_search_dirs("").is_empty());
     }
 
-    // 手元に g++-15 があるときだけ、本当にビルドして動かす
+    // 手元に GCC があるときだけ、本当にビルドして動かす
     // 展開したものの文法の確かめ（Phase 27。D-248）：通る・誤りがある・残った `#include "…"` は見つからない
     #[test]
     fn checks_the_syntax_of_expanded_sources() {
@@ -822,11 +897,17 @@ compilation terminated.
     #[test]
     fn builds_and_runs_with_local_gcc() {
         let Ok(compiler) = find_compiler(&CppSettings::default()) else {
-            eprintln!("g++-15 がないので飛ばします");
+            eprintln!("g++ が見つからないので飛ばします");
             return;
         };
         let (line, number) = version(&compiler).unwrap();
-        assert!(!line.is_empty() && number.starts_with("15."));
+        assert!(
+            !line.is_empty()
+                && number
+                    .split('.')
+                    .next()
+                    .is_some_and(|major| major.parse::<u32>().is_ok())
+        );
         let dir = TempDir::new("build");
         std::fs::write(
             dir.0.join(SOURCE),

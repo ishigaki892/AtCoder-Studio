@@ -351,7 +351,7 @@ S = [input() for _ in range(N)]
 
 - 整数は `int`、実数は `float`、文字列と 1 文字は `str` のままです。
 - 区切りのないグリッドは行ごとの文字列のリスト（`C[i][j]` で 1 文字）、空白区切りのグリッドはリストのリストになります。
-- 変数名は問題文のままで、縦に並ぶ組は列ごとのリストにします。Python の予約語や、生成コードで使う名前（`input`・`int`・`map`・`list`・`range` など）と重なる名前には、末尾に `_` を付けます。
+- 変数名は問題文のままで、縦に並ぶ組は列ごとのリストにします。設定画面の「問題文」で「Python の入力のコードの変数を小文字にする」をオンにすると、`n`・`a` のように小文字にします（添字つきの `S_X` は `s_x`）。Python の予約語や、生成コードで使う名前（`input`・`int`・`map`・`list`・`range` など）と重なる名前には、末尾に `_` を付けます。
 - 入力例との照合では、行の分かれ方（1 行あたりの値の数、横に並ぶ値の長さ、縦に並ぶ行数）も確認します。合わないときは「入力例 1 と合いません（2 行目：…）」のように表示されます。
 - 「solve() の入力を置き換える」は、開いている `.py` の `def solve():`（なければ `def main():`）に、`# 入力（AtCoder Studio）` と `# 入力ここまで` のコメントで囲んでコードを書き込みます。⌘Z で元に戻せます。
   - 目印があれば、その間を置き換えます。
@@ -419,7 +419,7 @@ S = [input() for _ in range(N)]
 
 #### コンパイラ
 
-Homebrew の GCC（`brew install gcc` で入る `g++-15`）が必要です。Apple の clang（Xcode Command Line Tools の `clang++`）は `#include <bits/stdc++.h>` が使えないため使いません。
+Homebrew の GCC が必要です。ジャッジと同じ GCC 15 は `brew install gcc@15` で入ります（`g++-15`）。`brew install gcc` で入る新しい版（`g++-16` など）でも動きますが、版の違いが実行ログに表示されます。Apple の clang（Xcode Command Line Tools の `clang++`）は `#include <bits/stdc++.h>` が使えないため使いません。
 
 g++ は、次の順に探します。
 
@@ -427,10 +427,11 @@ g++ は、次の順に探します。
 2. `/opt/homebrew/bin/g++-15`
 3. `PATH` 上の `g++-15`
 4. `/usr/local/bin/g++-15`
+5. 2〜4 のどれにもなければ、同じ場所にある `g++-16` などのうち、一番新しい版
 
 #### ビルドと実行
 
-- **「実行」「サンプルテスト」**：`g++-15 -std=gnu++23 -O2 -Wall -Wextra -DATCODER -DONLINE_JUDGE …` でビルドし、フォルダ内の `target/main` を実行します。
+- **「実行」「サンプルテスト」**：`g++ -std=gnu++23 -O2 -Wall -Wextra -DATCODER -DONLINE_JUDGE …` でビルドし、フォルダ内の `target/main` を実行します。
 - オプションはジャッジの「C++23 (GCC 15.2.0)」に合わせていますが、`-march=native`・`-fopenmp` などのオプションや、Boost などのライブラリは付けません（実行ログにも表示されます）。
 - コンパイルエラーや警告は「エラー一覧」に表示され、押すとその行に移動します。
 - `.cpp`・`.cc`・`.cxx`・`.hpp`・`.hh`・`.h` のファイルは C++ として色分けされます。
@@ -1448,6 +1449,7 @@ main から使っているライブラリを、main.rs の後ろに `mod mylib {
 | `problem.fillInput` | 「コンテストを作る」「この問題を作る」のときに、`input!`（C++・Python では入力のコード）を入れておくか（[input! を作る](#input-を作る)） |
 | `problem.language` | 問題やコンテストを作るときの言語（`rust`・`cpp`・`python`） |
 | `problem.mainLoop` | テストケースが複数のとき、入力の置き換えで `main()` に `for`（Rust なら `input!` と `for _ in 0..t { solve(); }`）まで書くか（[input! を作る](#input-を作る)） |
+| `problem.pythonLowercase` | Python の入力のコードの変数の名前を小文字にするか（`false`〔既定〕：問題文のまま、`true`：`n`・`a`。[input! を作る](#input-を作る)） |
 | `problem.timer` | 問題文の欄に経過時間を出して数えるか（`true`〔既定〕・`false`。[経過時間](#経過時間)） |
 | `submit.testBeforeSubmit`・`submit.confirmDialog` | 提出前のサンプルテストと確認ダイアログ（[提出の設定](#提出の設定)）。手で `confirmDialog` を `false` にした場合、OS の確認は出ません |
 | `notify.judge`・`notify.contestStart` | 判定・コンテストの開始の通知（[通知](#通知)）。手で `true` にした場合、テストの通知は出ません |
@@ -1519,7 +1521,7 @@ main から使っているライブラリを、main.rs の後ろに `mod mylib {
 | 表示 | すること |
 |---|---|
 | 「cargo が見つかりません」 | [rustup](https://rustup.rs) で Rust をインストールしてください |
-| C++ で「g++-15 が見つかりません」 | ターミナルで `brew install gcc` を実行してください |
+| C++ で「GCC（g++-15 など）が見つかりません」 | ターミナルで `brew install gcc@15` を実行してください |
 | C++ のファイルで「clangd が要ります」 | ターミナルで `xcode-select --install` を実行してください |
 | `.py` のファイルで「basedpyright が要ります」 | ターミナルで `brew install basedpyright` を実行してください |
 | `.py` の整形で「ruff が見つかりません」 | ターミナルで `brew install ruff` を実行してください |

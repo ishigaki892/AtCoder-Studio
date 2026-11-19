@@ -321,6 +321,8 @@ pub struct ProblemSettings {
     pub language: Language,
     // 問題文の欄に、問題ごとの経過時間を出して数える（Phase 42。D-266。既定はオン）
     pub timer: bool,
+    // Python の入力のコードの変数の名前を小文字にする（D-273。既定はオフ＝問題文のまま）
+    pub python_lowercase: bool,
 }
 
 // 見出しの行に出せるボタンの名前（input! を作る・サンプルを保存・再取得・公式ページ・解説〔Phase 25。D-244〕・この問題を作る・
@@ -344,6 +346,7 @@ impl Default for ProblemSettings {
             fill_input: false,
             language: Language::Rust,
             timer: true,
+            python_lowercase: false,
         }
     }
 }
@@ -378,6 +381,7 @@ fn parse_problem_settings(value: &Value, problems: &mut Vec<String>) -> ProblemS
         ("mainLoop", &mut settings.main_loop),
         ("fillInput", &mut settings.fill_input),
         ("timer", &mut settings.timer),
+        ("pythonLowercase", &mut settings.python_lowercase),
     ] {
         match section.get(key) {
             None => {}
@@ -928,6 +932,7 @@ pub fn write_settings(
         "fillInput": problem_settings.fill_input,
         "language": problem_settings.language,
         "timer": problem_settings.timer,
+        "pythonLowercase": problem_settings.python_lowercase,
     });
     // 読むときと同じ決まりで確かめる（画面が確かめたものでも、範囲の外の値・知らない名前などは書かない）
     let checked = serde_json::json!({
@@ -1029,6 +1034,7 @@ pub fn write_default_settings(dir: &Path) -> Result<(), String> {
             "mainLoop": false,
             "fillInput": false,
             "language": "rust",
+            "pythonLowercase": false,
         },
         "submit": { "testBeforeSubmit": true, "confirmDialog": true },
         "notify": { "judge": false, "contestStart": false },
@@ -1883,7 +1889,7 @@ mod tests {
         // 知らない名前・重なりは使わず、知らない名前は知らせる。並びは書いた順のまま読む
         fs::write(
             dir.0.join(SETTINGS_FILE),
-            r#"{"version": 1, "problem": {"fontSize": 15, "buttons": ["refresh", "nope", "refresh", "openPage"], "mainLoop": true, "fillInput": true, "language": "cpp", "timer": false}}"#,
+            r#"{"version": 1, "problem": {"fontSize": 15, "buttons": ["refresh", "nope", "refresh", "openPage"], "mainLoop": true, "fillInput": true, "language": "cpp", "timer": false, "pythonLowercase": true}}"#,
         )
         .unwrap();
         let loaded = load();
@@ -1895,6 +1901,7 @@ mod tests {
                 fill_input: true,
                 language: Language::Cpp,
                 timer: false,
+                python_lowercase: true,
             }
         );
         assert_eq!(loaded.appearance.problem_font_size, 15);
@@ -1932,6 +1939,7 @@ mod tests {
             fill_input: true,
             language: Language::Cpp,
             timer: false,
+            python_lowercase: true,
         };
         write_settings(
             &dir.0,

@@ -2249,6 +2249,7 @@ fn template_for_language(dir: &Path, language: Language) -> Result<scaffold::Tem
     // 入力のコードを入れておく設定（D-198。C++ は Phase 17 作業 8。D-213）
     template.fill = settings.fill_input.then_some(scaffold::FillInput {
         main_loop: settings.main_loop,
+        python_lowercase: settings.python_lowercase,
     });
     if language == Language::Cpp {
         let includes: Vec<PathBuf> = [cpp::library_dir(dir), cpp::ac_library_dir(dir)]
@@ -2622,11 +2623,17 @@ pub async fn make_input(
         .ok()
         .and_then(|root| resolve(&root, &format!("{}/{}", id.contest, id.task)).ok());
     tauri::async_runtime::spawn_blocking(move || {
+        let settings = storage::problem_settings(&dir);
         let language = package
             .and_then(|package| toolchain::package_language(&package))
-            .unwrap_or_else(|| storage::problem_settings(&dir).language);
+            .unwrap_or(settings.language);
         let problem = problem::load_saved(&dir, &id)?;
-        input_gen::generate_for(&problem.statement_html, &problem.samples, language)
+        input_gen::generate_styled(
+            &problem.statement_html,
+            &problem.samples,
+            language,
+            settings.python_lowercase,
+        )
     })
     .await
     .map_err(|_| "input! を作れません".to_string())?

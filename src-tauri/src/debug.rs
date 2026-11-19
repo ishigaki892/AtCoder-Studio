@@ -2258,7 +2258,7 @@ fn main() {
         assert_gone(pid);
     }
 
-    // ---- C++（Phase 17 作業 6。D-211・D-214）。g++-15 も要る ----
+    // ---- C++（Phase 17 作業 6。D-211・D-214）。GCC も要る ----
 
     const CPP_SOLUTION: &str = r#"#include <bits/stdc++.h>
 using namespace std;
@@ -2305,7 +2305,7 @@ int main() {
     #[test]
     fn debugs_cpp_with_real_lldb_dap() {
         if crate::cpp::find_compiler(&crate::cpp::CppSettings::default()).is_err() {
-            eprintln!("g++-15 がないので飛ばします");
+            eprintln!("g++ が見つからないので飛ばします");
             return;
         }
         let ws = workspace("cpp");
