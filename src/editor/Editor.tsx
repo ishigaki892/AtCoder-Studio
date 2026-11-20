@@ -20,6 +20,7 @@ import type { Language } from "../ipc/workspace";
 import { japanesePhrases } from "./phrases";
 import { indentRainbow } from "./indentRainbow";
 import { errorLens } from "./errorLens";
+import { fullWidthSpace } from "./fullWidthSpace";
 import { keepScrollOnClickFocus } from "./clickFocus";
 import { publishCursor } from "./breadcrumbTrail";
 import {
@@ -97,6 +98,12 @@ const editorTheme = EditorView.theme(
     ".cm-indent-rainbow-2": { backgroundColor: "var(--indent-rainbow-2)" },
     ".cm-indent-rainbow-3": { backgroundColor: "var(--indent-rainbow-3)" },
     ".cm-indent-rainbow-4": { backgroundColor: "var(--indent-rainbow-4)" },
+    // 全角スペース（D-274）。点線の枠（outline なので幅は変わらない）と薄い背景
+    ".cm-fullwidth-space": {
+      outline: "1px dashed var(--fullwidth-space)",
+      outlineOffset: "-1px",
+      backgroundColor: "var(--fullwidth-space-bg)",
+    },
     // 診断のある行の色と行末のメッセージ（Phase 8 作業 5。D-158）。行の色は背景の画像として重ね、
     // 今いる行の色と合わせて見えるようにする
     ".cm-errorLens-line-error": {
@@ -223,6 +230,7 @@ export function createEditorState(
       editorTheme,
       syntaxHighlighting(highlightStyle),
       indentRainbow,
+      fullWidthSpace,
       errorLens,
       keepScrollOnClickFocus,
       lspCompartment.of([]),

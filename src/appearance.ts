@@ -111,6 +111,8 @@ export const COLOR_GROUPS: { title: string; items: { name: string; label: string
       { name: "lens-error-line", label: "エラーの行" },
       { name: "lens-warning", label: "警告のメッセージ" },
       { name: "lens-warning-line", label: "警告の行" },
+      { name: "fullwidth-space", label: "全角スペースの枠" },
+      { name: "fullwidth-space-bg", label: "全角スペースの背景" },
     ],
   },
 ];

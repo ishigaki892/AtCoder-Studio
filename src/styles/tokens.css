@@ -100,6 +100,9 @@
   --lens-error-line: rgba(229, 83, 75, 0.2);
   --lens-warning: #cca700;
   --lens-warning-line: rgba(224, 192, 96, 0.19);
+  /* 全角スペースの印（D-274）。点線の枠と背景。利用者が設定で変えられる */
+  --fullwidth-space: rgba(255, 140, 60, 0.9);
+  --fullwidth-space-bg: rgba(255, 140, 60, 0.18);
 
   /* 検索の当たり（Phase 12 作業 2。D-183。Dark Modern の editor.findMatchBackground を半透明にしたもの） */
   --search-hit: rgba(158, 106, 3, 0.55);
