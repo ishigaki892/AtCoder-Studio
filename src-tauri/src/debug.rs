@@ -518,6 +518,23 @@ fn in_workspace(root: &Path, path: &str) -> Option<String> {
     real.starts_with(root).then(|| relative(root, &real))
 }
 
+// Rust の char（lldb では型が char32_t）を、文字コード（`U+0061`）でなく文字（`'a'`）で出す（D-276）。
+// lldb は Rust の char に表示の整形を持たず、数として出すため。書き方は Rust の `{:?}` と同じ（`'\n'`・`'\''`・
+// 見えない文字は `'\u{3000}'`）。型が char32_t で、値が `U+` と 16 進数だけのときに限る（C++ の char32_t は
+// `U+3042 U'あ'` のように文字も付いて来るので当たらない）。文字として正しくない値はそのまま
+fn char_value(type_name: Option<&str>, value: &str) -> String {
+    let shown = (type_name == Some("char32_t"))
+        .then(|| value.strip_prefix("U+"))
+        .flatten()
+        .filter(|hex| (1..=8).contains(&hex.len()) && hex.bytes().all(|b| b.is_ascii_hexdigit()))
+        .and_then(|hex| u32::from_str_radix(hex, 16).ok())
+        .and_then(char::from_u32);
+    match shown {
+        Some(ch) => format!("{ch:?}"),
+        None => value.to_string(),
+    }
+}
+
 // 関数の名前の末尾の `::h` と 16 桁の 16 進数（シンボルのハッシュ）を外す
 fn strip_hash(name: &str) -> String {
     if let Some(index) = name.rfind("::h") {
@@ -1169,7 +1186,10 @@ impl Client {
                     .take(MAX_VARIABLES)
                     .map(|variable| VariableView {
                         name: variable["name"].as_str().unwrap_or_default().to_string(),
-                        value: variable["value"].as_str().unwrap_or_default().to_string(),
+                        value: char_value(
+                            variable["type"].as_str(),
+                            variable["value"].as_str().unwrap_or_default(),
+                        ),
                         type_name: variable["type"].as_str().map(str::to_string),
                         variables_reference: variable["variablesReference"]
                             .as_i64()
@@ -1203,7 +1223,10 @@ impl Client {
         }
         let body = self.request("evaluate", arguments, REQUEST_WAIT)?;
         Ok(EvaluateView {
-            result: body["result"].as_str().unwrap_or_default().to_string(),
+            result: char_value(
+                body["type"].as_str(),
+                body["result"].as_str().unwrap_or_default(),
+            ),
             type_name: body["type"].as_str().map(str::to_string),
             variables_reference: body["variablesReference"].as_i64().unwrap_or_default(),
         })
@@ -1693,6 +1716,25 @@ mod tests {
         fs::write(path, text).unwrap();
     }
 
+    #[test]
+    fn shows_rust_chars_as_characters() {
+        let ty = Some("char32_t");
+        assert_eq!(char_value(ty, "U+0061"), "'a'");
+        assert_eq!(char_value(ty, "U+3042"), "'あ'");
+        assert_eq!(char_value(ty, "U+000A"), "'\\n'");
+        assert_eq!(char_value(ty, "U+0027"), "'\\''");
+        assert_eq!(char_value(ty, "U+0000"), "'\\0'");
+        assert_eq!(char_value(ty, "U+1F600"), "'😀'");
+        // 文字として正しくない値（サロゲート・範囲の外）や、形の違う値はそのまま
+        assert_eq!(char_value(ty, "U+D800"), "U+D800");
+        assert_eq!(char_value(ty, "U+110000"), "U+110000");
+        assert_eq!(char_value(ty, "U+"), "U+");
+        assert_eq!(char_value(ty, "U+3042 U+3042 U'あ'"), "U+3042 U+3042 U'あ'");
+        // 型が char32_t でなければ変えない（C++ の char・Rust の u8 は lldb が文字で出す）
+        assert_eq!(char_value(Some("char"), "U+0061"), "U+0061");
+        assert_eq!(char_value(Some("unsigned char"), "'q'"), "'q'");
+        assert_eq!(char_value(None, "U+0061"), "U+0061");
+    }
     #[test]
     fn strips_symbol_hashes() {
         assert_eq!(

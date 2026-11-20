@@ -619,17 +619,31 @@ fn main() {
         assert!((1.6..2.4).contains(&k), "{measured:?}");
         assert_eq!(measured.shape.as_deref(), Some("N² くらい"));
         assert!(!measured.estimated);
-        // 2. 時間の制限を小さくする（1 回の上限は 3 倍の 150 ms）：途中で止め、割合 1 を見積もる
-        write(&pkg.join("test/compare.json"), r#"{"timeLimitMs": 50}"#);
+        // 2. 時間の制限を小さくする：上限を超えた段で止め、それより大きい段は動かさない。
+        //    制限は 1 の割合 1/2 の段の時間の 1/6（1 回の上限は 3 倍で、割合 1/2 の段の半分）にする。決まった値（50 ms）
+        //    だと、速い Mac では割合 1/2 の段が上限に届かず、割合 1 まで進んでしまうため（2026-11-21）
+        let half_ms = measured.steps[SCALES.len() - 2].median_ms;
+        let limit = (half_ms / 6).max(1);
+        write(
+            &pkg.join("test/compare.json"),
+            &format!(r#"{{"timeLimitMs": {limit}}}"#),
+        );
         let Finish::Measured(measured) = measure(&pkg) else {
             panic!("測れませんでした");
         };
+        assert_eq!(measured.step_limit_ms, limit * 3);
         assert!(measured.steps.len() < SCALES.len(), "{measured:?}");
+        let (last, before) = measured.steps.split_last().unwrap();
         assert!(
-            measured.steps.last().unwrap().timed_out
-                || measured.steps.last().unwrap().median_ms > 150
+            last.timed_out || last.median_ms > measured.step_limit_ms,
+            "{measured:?}"
         );
-        assert_eq!(measured.step_limit_ms, 150);
+        assert!(
+            before
+                .iter()
+                .all(|step| !step.timed_out && step.median_ms <= measured.step_limit_ms),
+            "{measured:?}"
+        );
         let _ = std::fs::remove_file(pkg.join("test/compare.json"));
         // 3. 大きさを読まない生成器：測らずに止め、理由を出す
         write(&pkg.join("examples/gen.rs"), FIXED);
