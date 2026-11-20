@@ -421,8 +421,30 @@ body.dragging-horizontal * {
   display: flex;
   align-items: center;
   padding: 0 12px;
+  /* 収まらないときは、ボタンを押し潰さず（文字を折り返さず）横にスクロールする（D-275） */
+  overflow-x: auto;
+  overflow-y: hidden;
+  white-space: nowrap;
   background: var(--bg-toolbar);
   border-bottom: 1px solid var(--border);
+}
+
+.toolbar > * {
+  flex-shrink: 0;
+}
+
+/* 横のスクロールバーは細くし、バーにマウスを乗せたときだけつまみを出す（タブの列と同じ。D-191） */
+.toolbar::-webkit-scrollbar {
+  height: 3px;
+}
+
+.toolbar::-webkit-scrollbar-track,
+.toolbar::-webkit-scrollbar-thumb {
+  background: transparent;
+}
+
+.toolbar:hover::-webkit-scrollbar-thumb {
+  background: var(--scrollbar-thumb);
 }
 
 /*
@@ -1264,6 +1286,20 @@ button.breadcrumb:focus-visible {
   color: var(--fg-default);
   white-space: nowrap;
   pointer-events: none;
+}
+
+/* ボタンゾーンの中のツールチップは、スクロールで切り取られないように画面に対して置く（D-275。位置は layout/toolbarScroll.ts） */
+.toolbar .run-button-wrap[data-tip]:hover::after,
+.toolbar .run-button-wrap[data-tip]:has(:focus-visible)::after {
+  position: fixed;
+  top: var(--tip-top);
+  left: var(--tip-left);
+}
+
+.toolbar .contest-clock-wrap[data-tip]:hover::after {
+  position: fixed;
+  top: var(--tip-top);
+  right: var(--tip-right);
 }
 
 .contest-clock {

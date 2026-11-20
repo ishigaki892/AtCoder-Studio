@@ -42,6 +42,7 @@ import {
 import SettingsDialog from "./settings/SettingsDialog";
 import SettingsEditor from "./settings/SettingsEditor";
 import PaneBoundary from "./layout/PaneBoundary";
+import { placeToolbarTips, scrollToolbarSideways } from "./layout/toolbarScroll";
 import type { Command } from "./keybindings";
 import { applyAppearance } from "./appearance";
 import Editor, {
@@ -2245,8 +2246,15 @@ function App() {
         onDrag={(clientX) => dragSidebar(clientX)}
       />
 
-      {/* ボタンゾーン：問題の選択欄（Phase 3a。D-115）と「実行」「サンプルテスト」（D-044・D-046・D-047・D-100）、右端に残り時間（D-238） */}
-      <div className="toolbar">
+      {/* ボタンゾーン：問題の選択欄（Phase 3a。D-115）と「実行」「サンプルテスト」（D-044・D-046・D-047・D-100）、右端に残り時間（D-238）。
+          収まらないときは横にスクロールする（D-275） */}
+      <div
+        className="toolbar"
+        onWheel={scrollToolbarSideways}
+        onScroll={placeToolbarTips}
+        onPointerOver={placeToolbarTips}
+        onFocus={placeToolbarTips}
+      >
         <PaneBoundary name="ツールバー">
         <ProblemSelector
           current={currentProblem}
