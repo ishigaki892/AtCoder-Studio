@@ -167,7 +167,7 @@ export function useDebug({ onOpenFrame, onLog }: Options) {
     }));
     const failure = failureStop(reason);
     if (failure !== null) {
-      optionsRef.current.onLog(`\n${failure}で止まりました。\n`);
+      optionsRef.current.onLog(`\n${failure}止まりました。\n`);
     }
     try {
       const frames = await debugStack();

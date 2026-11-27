@@ -107,7 +107,7 @@ function DebugPanel({
         : view.phase === "running"
           ? "プログラムが動いています（下は、前に止まったときの内容です）"
           : failure !== null
-            ? `${failure}で止まっています`
+            ? `${failure}止まっています`
             : "止まっています";
 
   return (

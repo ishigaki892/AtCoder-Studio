@@ -758,7 +758,12 @@ fn described(tail: &str) -> Option<Result<Ty, bool>> {
     if tail.contains("文字列") {
         return Some(Ok(Ty::Chars));
     }
-    if tail.contains("実数") {
+    // 「実数」のほか、「小数第 2 位まで」「小数点以下 4 桁」とだけ書く問題もある（ABC169 C など）。
+    // 「最小数」などと取り違えないよう、「小数」だけでは決めない
+    if ["実数", "小数点", "小数第"]
+        .iter()
+        .any(|word| tail.contains(word))
+    {
         return Some(Ok(Ty::F64));
     }
     if tail.contains("文字") {
@@ -2904,6 +2909,26 @@ mod tests {
             generated.notes,
             ["Rust の予約語と同じ名前は、末尾に _ を付けました：fn → fn_、if → if_"]
         );
+        assert_eq!(generated.samples_matched, 1);
+    }
+
+    // 「実数」と書かず「小数第 2 位まで」「小数点以下 4 桁」とだけ書く問題（ABC169 C など）も f64 にする
+    #[test]
+    fn reads_decimals_written_without_jissu() {
+        let html = statement(
+            &["<var>A</var> <var>B</var> <var>C</var>"],
+            &[
+                "0 \\leq A \\leq 10^{15}",
+                "0 \\leq B \\lt 10",
+                "|C| \\leq 10^5",
+                "A は整数である",
+                "B は小数第 2 位まで与えられる",
+                "C は小数点以下 4 桁までで与えられる",
+            ],
+        );
+        let generated = generate(&html, &[sample("198 1.10 -0.5\n")]).unwrap();
+        assert_eq!(generated.solve, ["a: usize,", "b: f64,", "c: f64,"]);
+        assert_eq!(generated.notes, Vec::<String>::new());
         assert_eq!(generated.samples_matched, 1);
     }
 
